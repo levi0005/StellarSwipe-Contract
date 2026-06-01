@@ -413,6 +413,30 @@ impl TradeExecutorContract {
         triggers::check_and_trigger_stop_loss(&env, user, trade_id, asset_pair)
     }
 
+    /// Register a trailing stop for `(user, trade_id)`.
+    /// `trail_bps`: distance from peak in basis points (e.g. 500 = 5%).
+    /// `initial_price`: entry price used to seed the peak tracker.
+    pub fn set_trailing_stop(
+        env: Env,
+        user: Address,
+        trade_id: u64,
+        trail_bps: u32,
+        initial_price: i128,
+    ) {
+        user.require_auth();
+        triggers::set_trailing_stop(&env, &user, trade_id, trail_bps, initial_price);
+    }
+
+    /// Keeper: update trailing peak and trigger if price has dropped `trail_bps` below peak.
+    pub fn check_and_trigger_trailing_stop(
+        env: Env,
+        user: Address,
+        trade_id: u64,
+        asset_pair: u32,
+    ) -> Result<bool, ContractError> {
+        triggers::check_and_trigger_trailing_stop(&env, user, trade_id, asset_pair)
+    }
+
     /// Register a take-profit price for `(user, trade_id)`.
     pub fn set_take_profit_price(env: Env, user: Address, trade_id: u64, take_profit_price: i128) {
         user.require_auth();

@@ -38,6 +38,100 @@ pub fn get_stop_loss(env: &Env, user: &Address, trade_id: u64) -> Option<i128> {
         .get(&(Symbol::new(env, "StopLoss"), user.clone(), trade_id))
 }
 
+// ── Trailing stop (Issue #528) ──────────────────────────────────────────────
+
+/// Register a trailing stop for `(user, trade_id)`.
+/// `trail_bps`: distance from peak in basis points (e.g. 500 = 5%).
+/// `initial_price`: the entry price used to seed the peak tracker.
+pub fn set_trailing_stop(
+    env: &Env,
+    user: &Address,
+    trade_id: u64,
+    trail_bps: u32,
+    initial_price: i128,
+) {
+    env.storage().persistent().set(
+        &(Symbol::new(env, "TrailBps"), user.clone(), trade_id),
+        &trail_bps,
+    );
+    env.storage().persistent().set(
+        &(Symbol::new(env, "TrailPeak"), user.clone(), trade_id),
+        &initial_price,
+    );
+}
+
+pub fn get_trailing_stop(env: &Env, user: &Address, trade_id: u64) -> Option<(u32, i128)> {
+    let trail_bps: Option<u32> = env
+        .storage()
+        .persistent()
+        .get(&(Symbol::new(env, "TrailBps"), user.clone(), trade_id));
+    let peak: Option<i128> = env
+        .storage()
+        .persistent()
+        .get(&(Symbol::new(env, "TrailPeak"), user.clone(), trade_id));
+    match (trail_bps, peak) {
+        (Some(bps), Some(p)) => Some((bps, p)),
+        _ => None,
+    }
+}
+
+/// Update the peak price for a trailing stop. Call this whenever a new price is observed.
+/// Returns the updated peak (unchanged if `current_price` is not a new high).
+pub fn update_trailing_peak(
+    env: &Env,
+    user: &Address,
+    trade_id: u64,
+    current_price: i128,
+) -> i128 {
+    let peak_key = (Symbol::new(env, "TrailPeak"), user.clone(), trade_id);
+    let peak: i128 = env.storage().persistent().get(&peak_key).unwrap_or(0);
+    if current_price > peak {
+        env.storage().persistent().set(&peak_key, &current_price);
+        current_price
+    } else {
+        peak
+    }
+}
+
+/// Check oracle price, update trailing peak, and trigger if price has dropped
+/// `trail_bps` below the peak. Returns `true` when triggered.
+///
+/// ## Auth
+/// Keeper-callable (no user auth required).
+pub fn check_and_trigger_trailing_stop(
+    env: &Env,
+    user: Address,
+    trade_id: u64,
+    asset_pair: u32,
+) -> Result<bool, ContractError> {
+    let (oracle, portfolio) = fetch_oracle_and_portfolio(env)?;
+    let (trail_bps, _) =
+        get_trailing_stop(env, &user, trade_id).ok_or(ContractError::NotInitialized)?;
+    let current_price = fetch_current_price(env, &oracle, asset_pair)?;
+
+    // Update peak
+    let peak = update_trailing_peak(env, &user, trade_id, current_price);
+
+    // Trigger price = peak * (10000 - trail_bps) / 10000
+    let trigger_price = peak
+        .saturating_mul((10_000 - trail_bps as i128))
+        / 10_000;
+
+    if current_price <= trigger_price {
+        close_position_keeper(env, &portfolio, &user, trade_id, asset_pair);
+        env.events().publish(
+            (
+                Symbol::new(env, "trade_executor"),
+                Symbol::new(env, "trailing_stop_triggered"),
+            ),
+            (user, trade_id, peak, trigger_price, current_price),
+        );
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Register a take-profit price for `(user, trade_id)`.
 pub fn set_take_profit(env: &Env, user: &Address, trade_id: u64, take_profit_price: i128) {
     env.storage().persistent().set(
