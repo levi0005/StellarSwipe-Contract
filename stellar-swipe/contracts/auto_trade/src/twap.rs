@@ -34,6 +34,7 @@ pub struct TWAPOrder {
     pub amount_per_segment: i128,
     pub filled_amount: i128,
     pub weighted_price: i128,
+    pub price_window_minutes: u32,
     pub status: TWAPStatus,
 }
 
@@ -51,6 +52,7 @@ pub enum TWAPStorageKey {
     Counter,
     Order(u64),
     ActiveOrders,
+    PriceHistory(AssetPair),
 }
 
 // Storage functions
@@ -92,6 +94,104 @@ pub fn get_active_twap_orders(env: &Env) -> Vec<TWAPOrder> {
     active_orders
 }
 
+fn record_price_point(env: &Env, pair: &AssetPair, price: i128) {
+    let mut history: Vec<i128> = env
+        .storage()
+        .persistent()
+        .get(&TWAPStorageKey::PriceHistory(pair.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+
+    if history.len() >= 60 {
+        history.remove(0);
+    }
+    history.push_back(price);
+    env.storage()
+        .persistent()
+        .set(&TWAPStorageKey::PriceHistory(pair.clone()), &history);
+}
+
+fn get_price_history(env: &Env, pair: &AssetPair, window: u32) -> Vec<i128> {
+    let all: Vec<i128> = env
+        .storage()
+        .persistent()
+        .get(&TWAPStorageKey::PriceHistory(pair.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+    let mut recent = Vec::new(env);
+    let window = window.max(1);
+    let start = if all.len() > window { all.len() - window } else { 0 };
+    for i in start..all.len() {
+        if let Some(price) = all.get(i) {
+            recent.push_back(price);
+        }
+    }
+    recent
+}
+
+fn average_price(history: &Vec<i128>) -> i128 {
+    if history.len() == 0 {
+        return 0;
+    }
+    let mut sum = 0i128;
+    for price in history.iter() {
+        sum += price;
+    }
+    sum / (history.len() as i128)
+}
+
+fn volatility_from_history(env: &Env, history: &Vec<i128>) -> u32 {
+    if history.len() < 2 {
+        return 0;
+    }
+    let mut returns = Vec::new(env);
+    for i in 1..history.len() {
+        let prev = history.get(i - 1).unwrap();
+        let curr = history.get(i).unwrap();
+        if prev > 0 {
+            returns.push_back(((curr - prev).abs() * 10_000) / prev);
+        }
+    }
+    if returns.len() == 0 {
+        return 0;
+    }
+    let mut sum = 0i128;
+    for r in returns.iter() {
+        sum += r;
+    }
+    let mean = sum / (returns.len() as i128);
+    let mut variance = 0i128;
+    for r in returns.iter() {
+        let diff = r - mean;
+        variance += diff * diff;
+    }
+    let variance = variance / (returns.len() as i128);
+    let mut vol = 0i128;
+    if variance > 0 {
+        let mut x = variance;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + variance / x) / 2;
+        }
+        vol = x;
+    }
+    if vol == 0 {
+        0
+    } else {
+        vol as u32
+    }
+}
+
+fn get_baseline_volatility(env: &Env, pair: &AssetPair) -> Result<u32, AutoTradeError> {
+    let window = 30u32;
+    let history = get_price_history(env, pair, window);
+    let vol = volatility_from_history(env, &history);
+    Ok(vol.max(1000))
+}
+
+fn get_twap_price_window(env: &Env, pair: &AssetPair, window_minutes: u32) -> Vec<i128> {
+    get_price_history(env, pair, window_minutes)
+}
+
 // Core functions
 pub fn create_twap_order(
     env: &Env,
@@ -99,7 +199,8 @@ pub fn create_twap_order(
     pair: AssetPair,
     total_amount: i128,
     duration_minutes: u32,
-    num_segments: Option<u32>
+    num_segments: Option<u32>,
+    window_minutes: Option<u32>,
 ) -> Result<u64, AutoTradeError> {
     user.require_auth();
 
@@ -119,6 +220,7 @@ pub fn create_twap_order(
 
     let interval_seconds = duration_seconds / segments as u64;
     let amount_per_segment = total_amount / segments as i128;
+    let price_window_minutes = window_minutes.unwrap_or(15).max(5);
 
     let order_id = get_next_twap_id(env);
 
@@ -135,6 +237,7 @@ pub fn create_twap_order(
         amount_per_segment,
         filled_amount: 0,
         weighted_price: 0,
+        price_window_minutes,
         status: TWAPStatus::Active,
     };
 
@@ -206,6 +309,8 @@ fn execute_twap_segment(env: &Env, twap: &mut TWAPOrder) -> Result<u64, AutoTrad
     let simulated_price = get_market_price(env, &twap.pair)?;
     let simulated_fill = twap.amount_per_segment;
 
+    record_price_point(env, &twap.pair, simulated_price);
+
     twap.filled_amount += simulated_fill;
     twap.weighted_price += simulated_price * simulated_fill;
     twap.segments_executed += 1;
@@ -217,6 +322,36 @@ fn execute_twap_segment(env: &Env, twap: &mut TWAPOrder) -> Result<u64, AutoTrad
     );
 
     Ok(simulated_trade_id)
+}
+
+fn get_market_price(env: &Env, pair: &AssetPair) -> Result<i128, AutoTradeError> {
+    let history = get_price_history(env, pair, 4);
+    if let Some(last_price) = history.get(history.len().saturating_sub(1)) {
+        return Ok(*last_price);
+    }
+
+    let average = average_price(&history);
+    if average > 0 {
+        return Ok(average);
+    }
+
+    Ok(100_000)
+}
+
+fn calculate_volatility(env: &Env, pair: &AssetPair, period: u32) -> Result<u32, AutoTradeError> {
+    let history = get_price_history(env, pair, period + 1);
+    let vol = volatility_from_history(env, &history);
+    if vol == 0 {
+        Ok(1000)
+    } else {
+        Ok(vol)
+    }
+}
+
+fn get_baseline_volatility(env: &Env, pair: &AssetPair) -> Result<u32, AutoTradeError> {
+    let history = get_price_history(env, pair, 15);
+    let vol = volatility_from_history(env, &history);
+    Ok(vol.max(1000))
 }
 
 pub fn adjust_twap_strategy(env: &Env, order_id: u64) -> Result<(), AutoTradeError> {
@@ -311,7 +446,7 @@ mod tests {
         };
 
         // 10000 XLM over 60 mins -> default segments: max(60/5, 4) = 12
-        let result = create_twap_order(&env, user.clone(), pair.clone(), 10000, 60, None);
+        let result = create_twap_order(&env, user.clone(), pair.clone(), 10000, 60, None, None);
         assert!(result.is_ok());
 
         let order_id = result.unwrap();
@@ -335,7 +470,7 @@ mod tests {
             quote: String::from_str(&env, "USDC"),
         };
 
-        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 12000, 60, Some(12)).unwrap();
+        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 12000, 60, Some(12), None).unwrap();
         
         let twap_before = get_twap_order(&env, order_id).unwrap();
         assert_eq!(twap_before.amount_per_segment, 1000);
@@ -367,7 +502,7 @@ mod tests {
             quote: String::from_str(&env, "USD"),
         };
 
-        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 6000, 60, Some(6)).unwrap();
+        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 6000, 60, Some(6), None).unwrap();
         
         // Execute 2 segments (20 minutes pass)
         env.ledger().set_timestamp(1_000 + 1201);
@@ -391,7 +526,7 @@ mod tests {
         };
 
         // Create with 10 minute interval
-        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 1000, 100, Some(10)).unwrap();
+        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 1000, 100, Some(10), None).unwrap();
         let initial_interval = get_twap_order(&env, order_id).unwrap().interval_seconds;
         assert_eq!(initial_interval, 600);
 
@@ -411,7 +546,7 @@ mod tests {
             quote: String::from_str(&env, "USDC"),
         };
 
-        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 5000, 50, Some(5)).unwrap();
+        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 5000, 50, Some(5), None).unwrap();
         
         // Fast forward beyond the entire duration (50 mins = 3000 seconds)
         env.ledger().set_timestamp(1_000 + 3001);

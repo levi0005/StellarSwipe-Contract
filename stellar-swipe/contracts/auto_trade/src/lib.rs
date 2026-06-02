@@ -32,6 +32,8 @@ mod risk;
 mod risk_parity;
 mod sdex;
 mod smart_routing;
+mod logging;
+mod kyc;
 #[cfg(not(feature = "testutils"))]
 mod storage;
 #[cfg(feature = "testutils")]
@@ -342,6 +344,111 @@ impl AutoTradeContract {
         oracle::push_price_update(&env, &caller, asset_pair, price)
     }
 
+    /// Create a new TWAP order covering a larger trade over a configurable time window.
+    pub fn create_twap_order(
+        env: Env,
+        user: Address,
+        pair: twap::AssetPair,
+        total_amount: i128,
+        duration_minutes: u32,
+        num_segments: Option<u32>,
+        window_minutes: Option<u32>,
+    ) -> Result<u64, AutoTradeError> {
+        twap::create_twap_order(&env, user, pair, total_amount, duration_minutes, num_segments, window_minutes)
+    }
+
+    /// Execute all due TWAP segments for active running orders.
+    pub fn execute_twap_segments(env: Env) -> soroban_sdk::Vec<u64> {
+        twap::execute_twap_segments(&env)
+    }
+
+    /// Perform periodic strategy adjustment for a TWAP order based on volatility.
+    pub fn adjust_twap_strategy(env: Env, order_id: u64) -> Result<(), AutoTradeError> {
+        twap::adjust_twap_strategy(&env, order_id)
+    }
+
+    /// Cancel an active TWAP order and return a cancellation summary.
+    pub fn cancel_twap_order(
+        env: Env,
+        order_id: u64,
+        user: Address,
+    ) -> Result<twap::CancellationSummary, AutoTradeError> {
+        twap::cancel_twap_order(&env, order_id, user)
+    }
+
+    /// Retrieve a stored TWAP order.
+    pub fn get_twap_order(
+        env: Env,
+        order_id: u64,
+    ) -> Result<twap::TWAPOrder, AutoTradeError> {
+        twap::get_twap_order(&env, order_id)
+    }
+
+    /// Retrieve all active TWAP orders.
+    pub fn get_active_twap_orders(env: Env) -> soroban_sdk::Vec<twap::TWAPOrder> {
+        twap::get_active_twap_orders(&env)
+    }
+
+    /// Set the contract-wide log level for structured log emission.
+    pub fn set_log_level(
+        env: Env,
+        caller: Address,
+        level: logging::LogLevel,
+    ) -> Result<(), AutoTradeError> {
+        logging::set_log_level(&env, &caller, level)
+    }
+
+    /// Get the current configured log level.
+    pub fn get_log_level(env: Env) -> logging::LogLevel {
+        logging::get_log_level(&env)
+    }
+
+    /// Write a structured log entry to the contract event stream.
+    pub fn log_event(
+        env: Env,
+        level: logging::LogLevel,
+        category: String,
+        message: String,
+        correlation_id: Option<String>,
+    ) {
+        logging::emit_log(&env, level, category, message, correlation_id);
+    }
+
+    /// Submit a KYC verification request for a user.
+    pub fn submit_kyc_verification(
+        env: Env,
+        user: Address,
+        kyc_id: String,
+        level: kyc::KYCLevel,
+    ) -> Result<(), AutoTradeError> {
+        kyc::submit_kyc_verification(&env, &user, kyc_id, level)
+    }
+
+    /// Admin verifies a user's KYC status.
+    pub fn verify_kyc(
+        env: Env,
+        caller: Address,
+        user: Address,
+        verified: bool,
+    ) -> Result<(), AutoTradeError> {
+        kyc::verify_kyc(&env, &caller, &user, verified)
+    }
+
+    /// Get the stored KYC data for a user.
+    pub fn get_kyc_data(env: Env, user: Address) -> Option<kyc::KYCData> {
+        kyc::get_kyc_data(&env, &user)
+    }
+
+    /// Returns whether a user is currently KYC verified.
+    pub fn is_kyc_verified(env: Env, user: Address) -> bool {
+        kyc::is_kyc_verified(&env, &user)
+    }
+
+    /// Returns the user tier based on KYC verification level.
+    pub fn get_user_tier(env: Env, user: Address) -> String {
+        kyc::get_user_tier(&env, &user)
+    }
+
     /// Set the circuit breaker configuration (admin only)
     pub fn set_circuit_breaker_config(
         env: Env,
@@ -392,6 +499,14 @@ impl AutoTradeContract {
         if admin::is_paused(&env, String::from_str(&env, CAT_TRADING)) {
             return Err(AutoTradeError::TradingPaused);
         }
+
+        logging::emit_log(
+            &env,
+            logging::LogLevel::Info,
+            String::from_str(&env, "trade"),
+            String::from_str(&env, "execute_trade_started"),
+            None,
+        );
 
         // Oracle circuit breaker: halt if oracle is unavailable (unless admin override)
         oracle::check_oracle_circuit_breaker(&env, signal_id as u32)?;

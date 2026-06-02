@@ -358,7 +358,10 @@ pub fn update_cb_stats(env: &Env, failed: bool, volume: i128, price: i128) {
                 .instance()
                 .set(&AdminStorageKey::PauseStates, &states);
 
-            // In a real implementation, we would emit an event here too
+            env.events().publish(
+                (soroban_sdk::Symbol::new(env, "circuit_breaker_triggered"),),
+                reason,
+            );
         }
     }
 }
