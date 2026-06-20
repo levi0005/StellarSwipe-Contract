@@ -69,4 +69,8 @@ pub enum GovernanceError {
     /// The requested spend would cause the category's total governance-approved
     /// cap to be exceeded.
     ApprovedCapExceeded = 54,
+    /// The governance contract is administratively paused.  All state-mutating
+    /// governance actions (proposal execution, staking, timelock operations)
+    /// are blocked until an admin calls `set_contract_paused(false)`.
+    ContractPaused = 55,
 }
