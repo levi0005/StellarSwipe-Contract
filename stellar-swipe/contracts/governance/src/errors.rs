@@ -54,6 +54,7 @@ pub enum GovernanceError {
     ActionNotFound = 48,
     InvalidTimelockConfig = 49,
     ConvictionPoolNotFound = 50,
+ feat/governance-pause-propagation
     /// Fewer eligible voters participated in a committee election than the
     /// configured minimum quorum requires.  The election is voided and the
     /// committee keeps its existing members.
@@ -73,4 +74,7 @@ pub enum GovernanceError {
     /// governance actions (proposal execution, staking, timelock operations)
     /// are blocked until an admin calls `set_contract_paused(false)`.
     ContractPaused = 55,
+
+    InvalidCalibrationConfig = 51,
+ main
 }
