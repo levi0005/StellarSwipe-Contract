@@ -4,8 +4,13 @@
 //! Reputation score is adjusted after each vote window closes.
 //! Dispute resolution: if downvotes exceed DISPUTE_THRESHOLD_BPS of total votes,
 //! a dispute is opened and the provider's score is frozen until resolved.
+//!
+//! Issue #539: Disputed providers can appeal an open dispute. An appeal must
+//! be decided by an admin within APPEAL_WINDOW_SECS; if it isn't,
+//! `process_appeal_timeout` auto-advances the appeal to `Rejected` so a
+//! dispute can't be left in limbo forever by an unresponsive admin.
 
-use soroban_sdk::{contracttype, Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, Env, Map, Symbol, Vec};
 
 /// 10 XLM in stroops = 1 vote unit
 pub const VOTE_POWER_DIVISOR: i128 = 100_000_000;
@@ -19,6 +24,8 @@ pub const MAX_REPUTATION: u32 = 100;
 pub const SCORE_DELTA: u32 = 5;
 /// Minimum score floor (recovery cannot go below this)
 pub const MIN_REPUTATION: u32 = 0;
+/// Window an admin has to decide a submitted appeal before it auto-rejects: 3 days
+pub const APPEAL_WINDOW_SECS: u64 = 3 * 24 * 60 * 60;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,12 +51,40 @@ pub enum DisputeStatus {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppealStatus {
+    /// No appeal has been submitted for this dispute.
+    None,
+    /// An appeal was submitted and is awaiting an admin decision.
+    Pending,
+    /// An admin approved the appeal; the dispute is resolved in the provider's favor.
+    Approved,
+    /// The appeal was rejected by an admin, or auto-rejected after timing out.
+    Rejected,
+}
+
+#[contracttype]
 #[derive(Clone, Debug)]
 pub struct DisputeRecord {
     pub provider: Address,
     pub opened_at: u64,
     pub status: DisputeStatus,
     pub downvote_bps: u32,
+    pub appeal_status: AppealStatus,
+    /// Ledger timestamp the current appeal was submitted at; 0 if none was submitted.
+    pub appeal_submitted_at: u64,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum DisputeError {
+    Unauthorized = 1,
+    DisputeNotFound = 2,
+    DisputeNotOpen = 3,
+    AppealAlreadySubmitted = 4,
+    AppealNotPending = 5,
+    AppealWindowNotElapsed = 6,
 }
 
 #[contracttype]
@@ -209,6 +244,8 @@ fn open_dispute(env: &Env, provider: &Address, downvote_bps: u32) {
         opened_at: env.ledger().timestamp(),
         status: DisputeStatus::Open,
         downvote_bps,
+        appeal_status: AppealStatus::None,
+        appeal_submitted_at: 0,
     };
     env.storage().persistent().set(&dispute_key, &record);
     env.storage()
@@ -221,7 +258,9 @@ fn open_dispute(env: &Env, provider: &Address, downvote_bps: u32) {
     );
 }
 
-/// Admin resolves a dispute. If `restore` is true, score is unfrozen and recovery begins.
+/// Admin resolves a dispute directly. If `restore` is true, score is unfrozen and
+/// recovery begins. Any appeal still `Pending` is cleared, since the dispute it was
+/// raised against is being closed out by this call.
 pub fn resolve_dispute(env: &Env, provider: Address, restore: bool) {
     let dispute_key = VotingKey::Dispute(provider.clone());
     let mut record: DisputeRecord = env
@@ -233,9 +272,14 @@ pub fn resolve_dispute(env: &Env, provider: Address, restore: bool) {
             opened_at: 0,
             status: DisputeStatus::Resolved,
             downvote_bps: 0,
+            appeal_status: AppealStatus::None,
+            appeal_submitted_at: 0,
         });
 
     record.status = DisputeStatus::Resolved;
+    if record.appeal_status == AppealStatus::Pending {
+        record.appeal_status = AppealStatus::None;
+    }
     env.storage().persistent().set(&dispute_key, &record);
     env.storage()
         .persistent()
@@ -250,6 +294,99 @@ pub fn resolve_dispute(env: &Env, provider: Address, restore: bool) {
         (Symbol::new(env, "dispute_resolved"), provider.clone()),
         restore,
     );
+}
+
+/// Disputed provider submits an appeal of an open dispute. Only the provider the
+/// dispute was opened against may appeal it, and only once per dispute.
+pub fn submit_appeal(env: &Env, provider: Address) -> Result<(), DisputeError> {
+    provider.require_auth();
+
+    let dispute_key = VotingKey::Dispute(provider.clone());
+    let mut record: DisputeRecord = env
+        .storage()
+        .persistent()
+        .get(&dispute_key)
+        .ok_or(DisputeError::DisputeNotFound)?;
+
+    if record.status != DisputeStatus::Open {
+        return Err(DisputeError::DisputeNotOpen);
+    }
+    if record.appeal_status != AppealStatus::None {
+        return Err(DisputeError::AppealAlreadySubmitted);
+    }
+
+    record.appeal_status = AppealStatus::Pending;
+    record.appeal_submitted_at = env.ledger().timestamp();
+    env.storage().persistent().set(&dispute_key, &record);
+
+    env.events().publish(
+        (Symbol::new(env, "appeal_submitted"), provider.clone()),
+        record.appeal_submitted_at,
+    );
+    Ok(())
+}
+
+/// Admin decides a pending appeal. Approving resolves the dispute in the provider's
+/// favor (score unfrozen and one recovery step applied); rejecting leaves the original
+/// dispute in place for the admin to resolve separately via `resolve_dispute`.
+pub fn resolve_appeal(env: &Env, provider: Address, approve: bool) -> Result<(), DisputeError> {
+    let dispute_key = VotingKey::Dispute(provider.clone());
+    let mut record: DisputeRecord = env
+        .storage()
+        .persistent()
+        .get(&dispute_key)
+        .ok_or(DisputeError::DisputeNotFound)?;
+
+    if record.appeal_status != AppealStatus::Pending {
+        return Err(DisputeError::AppealNotPending);
+    }
+
+    record.appeal_status = if approve {
+        AppealStatus::Approved
+    } else {
+        AppealStatus::Rejected
+    };
+    env.storage().persistent().set(&dispute_key, &record);
+
+    if approve {
+        resolve_dispute(env, provider.clone(), true);
+    }
+
+    env.events().publish(
+        (Symbol::new(env, "appeal_resolved"), provider.clone()),
+        approve,
+    );
+    Ok(())
+}
+
+/// Auto-advances a pending appeal to `Rejected` once it has sat unresolved for more
+/// than [`APPEAL_WINDOW_SECS`]. Callable by anyone — it only enforces a deterministic
+/// timeout, so it doesn't need to be gated to a specific caller. This prevents a
+/// dispute from being left in limbo indefinitely because an admin never decided the
+/// appeal; the underlying dispute is unaffected and can still be resolved normally.
+pub fn process_appeal_timeout(env: &Env, provider: Address) -> Result<(), DisputeError> {
+    let dispute_key = VotingKey::Dispute(provider.clone());
+    let mut record: DisputeRecord = env
+        .storage()
+        .persistent()
+        .get(&dispute_key)
+        .ok_or(DisputeError::DisputeNotFound)?;
+
+    if record.appeal_status != AppealStatus::Pending {
+        return Err(DisputeError::AppealNotPending);
+    }
+    if env.ledger().timestamp() < record.appeal_submitted_at.saturating_add(APPEAL_WINDOW_SECS) {
+        return Err(DisputeError::AppealWindowNotElapsed);
+    }
+
+    record.appeal_status = AppealStatus::Rejected;
+    env.storage().persistent().set(&dispute_key, &record);
+
+    env.events().publish(
+        (Symbol::new(env, "appeal_timed_out"), provider.clone()),
+        record.appeal_submitted_at,
+    );
+    Ok(())
 }
 
 /// Recovery: increment score by SCORE_DELTA (called after dispute resolution or manually).
@@ -447,6 +584,152 @@ mod tests {
             }
             let history = get_reputation_history(env, &provider);
             assert_eq!(history.entries.len(), 10);
+        });
+    }
+
+    fn open_dispute_for(env: &Env, provider: &Address) {
+        for _ in 0..4u32 {
+            let voter = Address::generate(env);
+            cast_vote(env, voter, provider.clone(), VoteKind::Down, 1_000_000_000);
+        }
+        let voter = Address::generate(env);
+        cast_vote(env, voter, provider.clone(), VoteKind::Up, 1_000_000_000);
+    }
+
+    #[test]
+    fn test_submit_appeal_marks_pending() {
+        with_registry(|env| {
+            let provider = Address::generate(env);
+            open_dispute_for(env, &provider);
+
+            env.mock_all_auths();
+            submit_appeal(env, provider.clone()).unwrap();
+
+            let dispute = get_dispute(env, &provider).unwrap();
+            assert_eq!(dispute.appeal_status, AppealStatus::Pending);
+            assert_eq!(dispute.appeal_submitted_at, env.ledger().timestamp());
+        });
+    }
+
+    #[test]
+    fn test_submit_appeal_without_dispute_fails() {
+        with_registry(|env| {
+            let provider = Address::generate(env);
+
+            env.mock_all_auths();
+            let result = submit_appeal(env, provider);
+            assert_eq!(result, Err(DisputeError::DisputeNotFound));
+        });
+    }
+
+    #[test]
+    fn test_submit_appeal_twice_fails() {
+        with_registry(|env| {
+            let provider = Address::generate(env);
+            open_dispute_for(env, &provider);
+
+            env.mock_all_auths();
+            submit_appeal(env, provider.clone()).unwrap();
+            let result = submit_appeal(env, provider);
+            assert_eq!(result, Err(DisputeError::AppealAlreadySubmitted));
+        });
+    }
+
+    #[test]
+    fn test_resolve_appeal_approve_resolves_dispute_and_unfreezes_score() {
+        with_registry(|env| {
+            let provider = Address::generate(env);
+            open_dispute_for(env, &provider);
+
+            env.mock_all_auths();
+            submit_appeal(env, provider.clone()).unwrap();
+            resolve_appeal(env, provider.clone(), true).unwrap();
+
+            let dispute = get_dispute(env, &provider).unwrap();
+            assert_eq!(dispute.appeal_status, AppealStatus::Approved);
+            assert_eq!(dispute.status, DisputeStatus::Resolved);
+            let frozen: bool = env
+                .storage()
+                .persistent()
+                .get(&VotingKey::ScoreFrozen(provider.clone()))
+                .unwrap_or(false);
+            assert!(!frozen);
+        });
+    }
+
+    #[test]
+    fn test_resolve_appeal_reject_leaves_dispute_open() {
+        with_registry(|env| {
+            let provider = Address::generate(env);
+            open_dispute_for(env, &provider);
+
+            env.mock_all_auths();
+            submit_appeal(env, provider.clone()).unwrap();
+            resolve_appeal(env, provider.clone(), false).unwrap();
+
+            let dispute = get_dispute(env, &provider).unwrap();
+            assert_eq!(dispute.appeal_status, AppealStatus::Rejected);
+            assert_eq!(dispute.status, DisputeStatus::Open);
+
+            // Original dispute can still be resolved separately by an admin.
+            resolve_dispute(env, provider.clone(), true);
+            assert_eq!(get_dispute(env, &provider).unwrap().status, DisputeStatus::Resolved);
+        });
+    }
+
+    #[test]
+    fn test_resolve_appeal_without_pending_appeal_fails() {
+        with_registry(|env| {
+            let provider = Address::generate(env);
+            open_dispute_for(env, &provider);
+
+            let result = resolve_appeal(env, provider, true);
+            assert_eq!(result, Err(DisputeError::AppealNotPending));
+        });
+    }
+
+    #[test]
+    fn test_process_appeal_timeout_before_window_elapsed_fails() {
+        with_registry(|env| {
+            let provider = Address::generate(env);
+            open_dispute_for(env, &provider);
+
+            env.mock_all_auths();
+            submit_appeal(env, provider.clone()).unwrap();
+
+            env.ledger().set_timestamp(env.ledger().timestamp() + APPEAL_WINDOW_SECS - 1);
+            let result = process_appeal_timeout(env, provider);
+            assert_eq!(result, Err(DisputeError::AppealWindowNotElapsed));
+        });
+    }
+
+    #[test]
+    fn test_process_appeal_timeout_after_window_auto_rejects() {
+        with_registry(|env| {
+            let provider = Address::generate(env);
+            open_dispute_for(env, &provider);
+
+            env.mock_all_auths();
+            submit_appeal(env, provider.clone()).unwrap();
+
+            env.ledger().set_timestamp(env.ledger().timestamp() + APPEAL_WINDOW_SECS + 1);
+            process_appeal_timeout(env, provider.clone()).unwrap();
+
+            let dispute = get_dispute(env, &provider).unwrap();
+            assert_eq!(dispute.appeal_status, AppealStatus::Rejected);
+            // The underlying dispute itself is untouched by the timeout.
+            assert_eq!(dispute.status, DisputeStatus::Open);
+        });
+    }
+
+    #[test]
+    fn test_process_appeal_timeout_without_pending_appeal_fails() {
+        with_registry(|env| {
+            let provider = Address::generate(env);
+            open_dispute_for(env, &provider);
+
+            let result = process_appeal_timeout(env, provider);
+            assert_eq!(result, Err(DisputeError::AppealNotPending));
         });
     }
 }

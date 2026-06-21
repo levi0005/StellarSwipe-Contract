@@ -5,6 +5,7 @@ mod analytics;
 mod categories;
 mod collaboration;
 mod combos;
+mod community_voting;
 mod contests;
 mod cross_chain;
 mod errors;
@@ -48,6 +49,10 @@ use combos::{
     cancel_combo, create_combo_signal, execute_combo_signal, get_combo, get_combo_executions_pub,
     get_combo_performance, ComboExecution, ComboPerformanceSummary, ComboSignal, ComboType,
     ComponentExecution, ComponentSignal,
+};
+use community_voting::{
+    get_dispute, process_appeal_timeout, resolve_appeal, resolve_dispute, submit_appeal,
+    DisputeError, DisputeRecord,
 };
 use contests::{Contest, ContestEntry, ContestMetric, ContestStatus};
 use errors::{
@@ -1052,6 +1057,53 @@ impl SignalRegistry {
     pub fn get_provider_reputation_score(env: Env, provider: Address) -> u32 {
         let rep_key = StorageKey::ProviderReputationScore(provider);
         env.storage().instance().get(&rep_key).unwrap_or(50)
+    }
+
+    /// Provider appeals an open community-voting dispute against them (Issue #539).
+    /// Only the disputed provider may submit the appeal, and only once per dispute.
+    pub fn submit_dispute_appeal(env: Env, provider: Address) -> Result<(), DisputeError> {
+        submit_appeal(&env, provider)
+    }
+
+    /// Admin decides a pending dispute appeal (admin only). Approving resolves the
+    /// dispute in the provider's favor; rejecting leaves the dispute open for the
+    /// admin to resolve separately via `resolve_provider_dispute`.
+    pub fn resolve_dispute_appeal(
+        env: Env,
+        admin: Address,
+        provider: Address,
+        approve: bool,
+    ) -> Result<(), DisputeError> {
+        admin::require_admin(&env, &admin).map_err(|_| DisputeError::Unauthorized)?;
+        admin.require_auth();
+        resolve_appeal(&env, provider, approve)
+    }
+
+    /// Auto-rejects a dispute appeal that has sat pending for more than the appeal
+    /// window without an admin decision (Issue #539). Callable by anyone — it only
+    /// enforces a deterministic timeout, so it can't be misused to change an outcome.
+    pub fn process_dispute_appeal_timeout(env: Env, provider: Address) -> Result<(), DisputeError> {
+        process_appeal_timeout(&env, provider)
+    }
+
+    /// Admin resolves a community-voting dispute directly (admin only). If `restore`
+    /// is true, the provider's reputation score is unfrozen and one recovery step is
+    /// applied immediately.
+    pub fn resolve_provider_dispute(
+        env: Env,
+        admin: Address,
+        provider: Address,
+        restore: bool,
+    ) -> Result<(), AdminError> {
+        admin::require_admin(&env, &admin)?;
+        admin.require_auth();
+        resolve_dispute(&env, provider, restore);
+        Ok(())
+    }
+
+    /// Get the current community-voting dispute record for a provider, if any.
+    pub fn get_provider_dispute(env: Env, provider: Address) -> Option<DisputeRecord> {
+        get_dispute(&env, &provider)
     }
 
     pub fn get_provider_stats(env: Env, provider: Address) -> Option<ProviderPerformance> {
