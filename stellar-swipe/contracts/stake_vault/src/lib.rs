@@ -55,6 +55,7 @@ fn emit_provider_tier_change(
 pub enum StorageKey {
     Admin,
     StakeToken,
+    SignalRegistry,
     /// Minimum stake required for a provider to submit signals.
     MinimumStake,
     /// Timestamp when a provider's stake first dropped below minimum.
@@ -79,15 +80,14 @@ pub struct StakeVaultContract;
 
 #[contractimpl]
 impl StakeVaultContract {
-    /// One-time initialization. Stores admin and the SEP-41 stake token address.
-    pub fn initialize(env: Env, admin: Address, stake_token: Address) {
+    /// One-time initialization. Stores admin, the SEP-41 stake token address, and the authorized SignalRegistry address.
+    pub fn initialize(env: Env, admin: Address, stake_token: Address, signal_registry: Address) {
         if env.storage().instance().has(&StorageKey::Admin) {
             panic!("already initialized");
         }
         env.storage().instance().set(&StorageKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&StorageKey::StakeToken, &stake_token);
+        env.storage().instance().set(&StorageKey::StakeToken, &stake_token);
+        env.storage().instance().set(&StorageKey::SignalRegistry, &signal_registry);
     }
 
     /// Admin: set the minimum stake required for signal submission.
@@ -292,6 +292,14 @@ impl StakeVaultContract {
     ) -> Result<(), StakeVaultError> {
         // Only the SignalRegistry (authorized caller) can slash stake.
         caller.require_auth();
+        let signal_registry: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::SignalRegistry)
+            .ok_or(StakeVaultError::NotInitialized)?;
+        if caller != signal_registry {
+            return Err(StakeVaultError::Unauthorized);
+        }
 
         let token: Address = env
             .storage()

@@ -40,24 +40,25 @@ fn seed_v2_stake(env: &Env, contract_id: &Address, staker: &Address, balance: i1
     });
 }
 
-fn setup() -> (Env, Address, Address, Address) {
+fn setup() -> (Env, Address, Address, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
+    let signal_registry = Address::generate(&env);
     let token = sac_token(&env, &admin);
     let vault_id = env.register(StakeVaultContract, ());
 
-    StakeVaultContractClient::new(&env, &vault_id).initialize(&admin, &token);
+    StakeVaultContractClient::new(&env, &vault_id).initialize(&admin, &token, &signal_registry);
 
-    (env, vault_id, token, admin)
+    (env, vault_id, token, admin, signal_registry)
 }
 
 // ── Basic withdraw tests ──────────────────────────────────────────────────────
 
 #[test]
 fn withdraw_stake_transfers_balance() {
-    let (env, vault_id, token, admin) = setup();
+    let (env, vault_id, token, _admin, _registry) = setup();
     let staker = Address::generate(&env);
     let amount: i128 = 5_000_000;
 
@@ -75,7 +76,7 @@ fn withdraw_stake_transfers_balance() {
 
 #[test]
 fn withdraw_stake_no_stake_returns_error() {
-    let (env, vault_id, _token, _admin) = setup();
+    let (env, vault_id, _token, _admin, _registry) = setup();
     let staker = Address::generate(&env);
 
     let err = env.as_contract(&vault_id, || {
@@ -86,7 +87,7 @@ fn withdraw_stake_no_stake_returns_error() {
 
 #[test]
 fn withdraw_stake_locked_returns_error() {
-    let (env, vault_id, token, _admin) = setup();
+    let (env, vault_id, token, _admin, _registry) = setup();
     let staker = Address::generate(&env);
     let amount: i128 = 1_000_000;
 
@@ -166,13 +167,14 @@ fn reentrant_withdraw_is_blocked() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
+    let signal_registry = Address::generate(&env);
     let staker = Address::generate(&env);
 
     // Register the malicious token and the vault.
     let token_id = env.register(ReentrantToken, ());
     let vault_id = env.register(StakeVaultContract, ());
 
-    StakeVaultContractClient::new(&env, &vault_id).initialize(&admin, &token_id);
+    StakeVaultContractClient::new(&env, &vault_id).initialize(&admin, &token_id, &signal_registry);
 
     // Wire the reentrant token to know the vault and staker.
     ReentrantTokenClient::new(&env, &token_id).set_vault(&vault_id);
@@ -192,7 +194,7 @@ fn reentrant_withdraw_is_blocked() {
 
 #[test]
 fn lock_cleared_after_successful_withdrawal() {
-    let (env, vault_id, token, _admin) = setup();
+    let (env, vault_id, token, _admin, _registry) = setup();
     let staker = Address::generate(&env);
     let amount: i128 = 2_000_000;
 
@@ -210,7 +212,7 @@ fn lock_cleared_after_successful_withdrawal() {
 
 #[test]
 fn lock_cleared_after_failed_withdrawal() {
-    let (env, vault_id, _token, _admin) = setup();
+    let (env, vault_id, _token, _admin, _registry) = setup();
     let staker = Address::generate(&env);
 
     // First call fails (NoStake) — lock must still be cleared.
@@ -234,8 +236,7 @@ fn lock_cleared_after_failed_withdrawal() {
 #[test]
 fn slash_stake_emits_event() {
     use soroban_sdk::testutils::Events;
-    let (env, vault_id, token, _admin) = setup();
-    let caller = Address::generate(&env);
+    let (env, vault_id, token, _admin, signal_registry) = setup();
     let provider = Address::generate(&env);
     let amount: i128 = 500_000;
 
@@ -244,7 +245,7 @@ fn slash_stake_emits_event() {
 
     let events_before = env.events().all().len();
     StakeVaultContractClient::new(&env, &vault_id)
-        .slash_stake(&caller, &provider, &amount, &Symbol::new(&env, "ban"));
+        .slash_stake(&signal_registry, &provider, &amount, &Symbol::new(&env, "ban"));
 
     assert!(
         env.events().all().len() > events_before,
@@ -254,8 +255,7 @@ fn slash_stake_emits_event() {
 
 #[test]
 fn slash_stake_reduces_provider_balance() {
-    let (env, vault_id, token, _admin) = setup();
-    let caller = Address::generate(&env);
+    let (env, vault_id, token, _admin, signal_registry) = setup();
     let provider = Address::generate(&env);
     let initial: i128 = 1_000_000;
     let slash_amount: i128 = 300_000;
@@ -264,7 +264,7 @@ fn slash_stake_reduces_provider_balance() {
     seed_v2_stake(&env, &vault_id, &provider, initial, 0);
 
     let client = StakeVaultContractClient::new(&env, &vault_id);
-    client.slash_stake(&caller, &provider, &slash_amount, &Symbol::new(&env, "fraud"));
+    client.slash_stake(&signal_registry, &provider, &slash_amount, &Symbol::new(&env, "fraud"));
 
     assert_eq!(client.get_stake(&provider), initial - slash_amount);
 }
@@ -272,8 +272,7 @@ fn slash_stake_reduces_provider_balance() {
 #[test]
 fn slash_stake_burns_tokens_from_vault() {
     use soroban_sdk::token;
-    let (env, vault_id, token_addr, _admin) = setup();
-    let caller = Address::generate(&env);
+    let (env, vault_id, token_addr, _admin, signal_registry) = setup();
     let provider = Address::generate(&env);
     let initial: i128 = 1_000_000;
     let slash_amount: i128 = 400_000;
@@ -285,7 +284,7 @@ fn slash_stake_burns_tokens_from_vault() {
     let balance_before = token_client.balance(&vault_id);
 
     StakeVaultContractClient::new(&env, &vault_id)
-        .slash_stake(&caller, &provider, &slash_amount, &Symbol::new(&env, "misconduct"));
+        .slash_stake(&signal_registry, &provider, &slash_amount, &Symbol::new(&env, "misconduct"));
 
     assert_eq!(
         token_client.balance(&vault_id),
@@ -294,11 +293,27 @@ fn slash_stake_burns_tokens_from_vault() {
     );
 }
 
+#[test]
+fn slash_stake_unauthorized_caller_rejected() {
+    let (env, vault_id, token, _admin, _signal_registry) = setup();
+    let unauthorized = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let amount: i128 = 500_000;
+
+    StellarAssetClient::new(&env, &token).mint(&vault_id, &amount);
+    seed_v2_stake(&env, &vault_id, &provider, amount, 0);
+
+    let result = StakeVaultContractClient::new(&env, &vault_id)
+        .try_slash_stake(&unauthorized, &provider, &amount, &Symbol::new(&env, "ban"));
+
+    assert_eq!(result, Err(Ok(StakeVaultError::Unauthorized)));
+}
+
 // ── Issue #388: stake-below-minimum tests ─────────────────────────────────────
 
 #[test]
 fn signal_submission_allowed_when_stake_above_minimum() {
-    let (env, vault_id, token, _admin) = setup();
+    let (env, vault_id, token, _admin, _registry) = setup();
     let provider = Address::generate(&env);
     let amount: i128 = 1_000_000;
 
@@ -316,7 +331,7 @@ fn signal_submission_allowed_when_stake_above_minimum() {
 #[test]
 fn notify_stake_below_minimum_emits_event() {
     use soroban_sdk::testutils::Events;
-    let (env, vault_id, token, _admin) = setup();
+    let (env, vault_id, token, _admin, _registry) = setup();
     let provider = Address::generate(&env);
 
     StellarAssetClient::new(&env, &token).mint(&vault_id, &100_000i128);
@@ -333,7 +348,7 @@ fn notify_stake_below_minimum_emits_event() {
 #[test]
 fn signal_submission_blocked_after_grace_period_expires() {
     use soroban_sdk::testutils::Ledger;
-    let (env, vault_id, token, _admin) = setup();
+    let (env, vault_id, token, _admin, _registry) = setup();
     let provider = Address::generate(&env);
 
     StellarAssetClient::new(&env, &token).mint(&vault_id, &100_000i128);
@@ -355,7 +370,7 @@ fn signal_submission_blocked_after_grace_period_expires() {
 #[test]
 fn signal_submission_allowed_within_grace_period() {
     use soroban_sdk::testutils::Ledger;
-    let (env, vault_id, token, _admin) = setup();
+    let (env, vault_id, token, _admin, _registry) = setup();
     let provider = Address::generate(&env);
 
     StellarAssetClient::new(&env, &token).mint(&vault_id, &100_000i128);
@@ -375,7 +390,7 @@ fn signal_submission_allowed_within_grace_period() {
 
 #[test]
 fn stake_restoration_clears_below_min_flag() {
-    let (env, vault_id, token, _admin) = setup();
+    let (env, vault_id, token, _admin, _registry) = setup();
     let provider = Address::generate(&env);
 
     StellarAssetClient::new(&env, &token).mint(&vault_id, &100_000i128);
