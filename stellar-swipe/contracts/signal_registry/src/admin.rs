@@ -3,6 +3,7 @@ use stellar_swipe_common::emergency::{
     CircuitBreakerConfig, CircuitBreakerStats, PauseState, CAT_ALL, CAT_SIGNALS, CAT_STAKES,
     CAT_TRADING,
 };
+use stellar_swipe_common::validate_signer_config;
 
 use crate::errors::AdminError;
 use crate::events::*;
@@ -44,6 +45,7 @@ pub enum AdminStorageKey {
     BronzeSignalLimit,
     SilverSignalLimit,
     GoldSignalLimit,
+    PreventSelfDestruct,
 }
 
 #[contracttype]
@@ -140,8 +142,16 @@ pub fn get_admin(env: &Env) -> Result<Address, AdminError> {
 
 /// Set guardian address (admin only)
 pub fn set_guardian(env: &Env, caller: &Address, guardian: Address) -> Result<(), AdminError> {
-    require_admin(env, caller)?;
+    require_direct_admin_or_not_multisig(env, caller)?;
     caller.require_auth();
+    set_guardian_direct(env, caller, guardian)
+}
+
+pub fn set_guardian_direct(
+    env: &Env,
+    _caller: &Address,
+    guardian: Address,
+) -> Result<(), AdminError> {
     env.storage()
         .instance()
         .set(&AdminStorageKey::Guardian, &guardian);
@@ -171,6 +181,16 @@ pub fn get_guardian(env: &Env) -> Option<Address> {
 /// Check if caller is the guardian
 fn is_guardian(env: &Env, caller: &Address) -> bool {
     get_guardian(env).map(|g| &g == caller).unwrap_or(false)
+}
+
+fn require_direct_admin_or_not_multisig(env: &Env, caller: &Address) -> Result<(), AdminError> {
+    if is_multisig_enabled(env) {
+        if !is_multisig_signer(env, caller) {
+            return Err(AdminError::Unauthorized);
+        }
+        return Err(AdminError::RequiresMultisigApproval);
+    }
+    require_admin(env, caller)
 }
 
 /// Verify caller is admin
@@ -214,23 +234,35 @@ pub fn propose_admin_transfer(
     caller: &Address,
     new_admin: Address,
 ) -> Result<(), AdminError> {
-    require_admin(env, caller)?;
+    require_direct_admin_or_not_multisig(env, caller)?;
     caller.require_auth();
+    propose_admin_transfer_direct(env, caller, new_admin)
+}
 
-    let expires_at = env
+pub fn propose_admin_transfer_direct(
+    env: &Env,
+    caller: &Address,
+    new_admin: Address,
+) -> Result<(), AdminError> {
+    let expires_at_ledger = env
         .ledger()
-        .timestamp()
-        .saturating_add(ADMIN_TRANSFER_EXPIRY_SECS);
+        .sequence()
+        .saturating_add((ADMIN_TRANSFER_EXPIRY_SECS / 5) as u32);
     let pending = PendingAdminTransfer {
         pending_admin: new_admin.clone(),
-        expires_at,
+        expires_at_ledger,
     };
 
     env.storage()
         .instance()
         .set(&AdminStorageKey::PendingAdminTransfer, &pending);
 
-    emit_admin_transfer_proposed(env, caller.clone(), new_admin, expires_at_ledger as u64);
+    emit_admin_transfer_proposed(
+        env,
+        caller.clone(),
+        new_admin,
+        expires_at_ledger as u64,
+    );
     Ok(())
 }
 
@@ -267,9 +299,12 @@ pub fn cancel_admin_transfer(env: &Env, caller: &Address) -> Result<(), AdminErr
 
 /// Set minimum stake requirement
 pub fn set_min_stake(env: &Env, caller: &Address, new_amount: i128) -> Result<(), AdminError> {
-    require_admin(env, caller)?;
+    require_direct_admin_or_not_multisig(env, caller)?;
     caller.require_auth();
+    set_min_stake_direct(env, caller, new_amount)
+}
 
+pub fn set_min_stake_direct(env: &Env, _caller: &Address, new_amount: i128) -> Result<(), AdminError> {
     if new_amount <= 0 {
         return Err(AdminError::InvalidParameter);
     }
@@ -303,9 +338,12 @@ pub fn get_min_stake(env: &Env) -> i128 {
 
 /// Set trade fee in basis points
 pub fn set_trade_fee(env: &Env, caller: &Address, new_fee_bps: u32) -> Result<(), AdminError> {
-    require_admin(env, caller)?;
+    require_direct_admin_or_not_multisig(env, caller)?;
     caller.require_auth();
+    set_trade_fee_direct(env, caller, new_fee_bps)
+}
 
+pub fn set_trade_fee_direct(env: &Env, _caller: &Address, new_fee_bps: u32) -> Result<(), AdminError> {
     if new_fee_bps > MAX_FEE_BPS {
         return Err(AdminError::InvalidFeeRate);
     }
@@ -344,9 +382,17 @@ pub fn set_risk_defaults(
     stop_loss: u32,
     position_limit: u32,
 ) -> Result<(), AdminError> {
-    require_admin(env, caller)?;
+    require_direct_admin_or_not_multisig(env, caller)?;
     caller.require_auth();
+    set_risk_defaults_direct(env, caller, stop_loss, position_limit)
+}
 
+pub fn set_risk_defaults_direct(
+    env: &Env,
+    _caller: &Address,
+    stop_loss: u32,
+    position_limit: u32,
+) -> Result<(), AdminError> {
     if stop_loss > MAX_RISK_PERCENTAGE || position_limit > MAX_RISK_PERCENTAGE {
         return Err(AdminError::InvalidRiskParameter);
     }
@@ -402,7 +448,7 @@ pub fn get_default_position_limit(env: &Env) -> u32 {
         .unwrap_or(DEFAULT_POSITION_LIMIT)
 }
 
-/// Pause a category (admin or guardian)
+/// Pause a category (admin or guardian; admin path requires multisig when enabled)
 pub fn pause_category(
     env: &Env,
     caller: &Address,
@@ -413,10 +459,19 @@ pub fn pause_category(
     if is_guardian(env, caller) {
         caller.require_auth();
     } else {
-        require_admin(env, caller)?;
+        require_direct_admin_or_not_multisig(env, caller)?;
         caller.require_auth();
     }
+    pause_category_direct(env, caller, category, duration, reason)
+}
 
+pub fn pause_category_direct(
+    env: &Env,
+    caller: &Address,
+    category: String,
+    duration: Option<u64>,
+    reason: String,
+) -> Result<(), AdminError> {
     let now = env.ledger().timestamp();
     let auto_unpause_at = duration.map(|d| now + d);
 
@@ -450,9 +505,16 @@ pub fn pause_trading(env: &Env, caller: &Address) -> Result<(), AdminError> {
 
 /// Unpause a category
 pub fn unpause_category(env: &Env, caller: &Address, category: String) -> Result<(), AdminError> {
-    require_admin(env, caller)?;
+    require_direct_admin_or_not_multisig(env, caller)?;
     caller.require_auth();
+    unpause_category_direct(env, caller, category)
+}
 
+pub fn unpause_category_direct(
+    env: &Env,
+    caller: &Address,
+    category: String,
+) -> Result<(), AdminError> {
     let mut states = get_pause_states(env);
     if states.contains_key(category.clone()) {
         states.remove(category.clone());
@@ -562,8 +624,18 @@ pub fn set_tier_signal_limits(
     silver: u32,
     gold: u32,
 ) -> Result<(), AdminError> {
-    require_admin(env, caller)?;
+    require_direct_admin_or_not_multisig(env, caller)?;
     caller.require_auth();
+    set_tier_signal_limits_direct(env, caller, bronze, silver, gold)
+}
+
+pub fn set_tier_signal_limits_direct(
+    env: &Env,
+    _caller: &Address,
+    bronze: u32,
+    silver: u32,
+    gold: u32,
+) -> Result<(), AdminError> {
     env.storage()
         .instance()
         .set(&AdminStorageKey::BronzeSignalLimit, &bronze);
@@ -609,18 +681,11 @@ pub fn enable_multisig(
     require_admin(env, caller)?;
     caller.require_auth();
 
-    if threshold == 0 || threshold > signers.len() {
-        return Err(AdminError::InvalidParameter);
-    }
-
-    // Check for duplicate signers
-    for i in 0..signers.len() {
-        for j in (i + 1)..signers.len() {
-            if signers.get(i).unwrap() == signers.get(j).unwrap() {
-                return Err(AdminError::DuplicateSigner);
-            }
-        }
-    }
+    validate_signer_config(&signers, threshold).map_err(|e| match e {
+        stellar_swipe_common::MultisigError::DuplicateSigner => AdminError::DuplicateSigner,
+        stellar_swipe_common::MultisigError::InvalidThreshold => AdminError::InvalidParameter,
+        _ => AdminError::InvalidParameter,
+    })?;
 
     env.storage()
         .instance()
@@ -772,9 +837,12 @@ pub fn remove_multisig_signer(
 
 /// Pause fee collection. Read operations and position closures continue.
 pub fn pause_fee_collection(env: &Env, caller: &Address) -> Result<(), AdminError> {
-    require_admin(env, caller)?;
+    require_direct_admin_or_not_multisig(env, caller)?;
     caller.require_auth();
+    pause_fee_collection_direct(env, caller)
+}
 
+pub fn pause_fee_collection_direct(env: &Env, _caller: &Address) -> Result<(), AdminError> {
     env.storage()
         .instance()
         .set(&AdminStorageKey::FeeCollectionPaused, &true);
@@ -785,9 +853,12 @@ pub fn pause_fee_collection(env: &Env, caller: &Address) -> Result<(), AdminErro
 
 /// Resume fee collection.
 pub fn resume_fee_collection(env: &Env, caller: &Address) -> Result<(), AdminError> {
-    require_admin(env, caller)?;
+    require_direct_admin_or_not_multisig(env, caller)?;
     caller.require_auth();
+    resume_fee_collection_direct(env, caller)
+}
 
+pub fn resume_fee_collection_direct(env: &Env, _caller: &Address) -> Result<(), AdminError> {
     env.storage()
         .instance()
         .set(&AdminStorageKey::FeeCollectionPaused, &false);

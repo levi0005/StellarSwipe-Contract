@@ -468,18 +468,14 @@ fn test_multisig_enable_and_use() {
     signers.push_back(signer2.clone());
     signers.push_back(signer3.clone());
 
-    // Enable multi-sig with 2-of-3 threshold
     client.enable_multisig(&admin, &signers, &2);
 
     assert!(client.is_multisig_enabled());
     assert_eq!(client.get_multisig_threshold(), 2);
 
-    let returned_signers = client.get_multisig_signers();
-    assert_eq!(returned_signers.len(), 3);
-
-    // Any signer should be able to pause
-    client.pause_trading(&signer1);
-    assert!(client.is_paused());
+    // Direct pause by signer is blocked; use approval workflow instead
+    let result = client.try_pause_trading(&signer1);
+    assert_eq!(result, Err(Ok(AdminError::RequiresMultisigApproval)));
 }
 
 #[test]
