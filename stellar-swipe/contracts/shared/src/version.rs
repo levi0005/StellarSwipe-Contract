@@ -10,7 +10,7 @@
 //! per-callee-kind: each contract kind declares a minimum acceptable callee
 //! version in [`min_version_for`].
 
-use soroban_sdk::{contracterror, contracttype, symbol_short, Env};
+use soroban_sdk::{contracterror, contracttype, symbol_short, Env, panic_with_error};
 
 // ── Per-contract version constants ───────────────────────────────────────────
 

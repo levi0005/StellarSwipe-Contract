@@ -380,12 +380,16 @@ fn slash_stake(env: &Env, provider: &Address, stake_vault: &Address) -> i128 {
         .unwrap_or(0);
 
     if stake > 0 {
-        // Call slash_stake on StakeVault (the contract will burn/transfer the slashed amount)
+        // Call slash_stake on StakeVault — pass this contract as caller (authorizes the slash),
+        // the provider, the full stake amount, and a reason tag for the audit event.
         let slash_sym = soroban_sdk::Symbol::new(env, "slash_stake");
         let mut slash_args = soroban_sdk::Vec::<soroban_sdk::Val>::new(env);
+        let caller = env.current_contract_address();
+        slash_args.push_back(caller.into_val(env));
         slash_args.push_back(provider.clone().into_val(env));
         slash_args.push_back(stake.into_val(env));
-        // We attempt to slash, but if it fails, we still return the stake amount for the event
+        let reason = soroban_sdk::Symbol::new(env, "ban");
+        slash_args.push_back(reason.into_val(env));
         let _ = env.try_invoke_contract::<()>(stake_vault, &slash_sym, slash_args);
     }
 

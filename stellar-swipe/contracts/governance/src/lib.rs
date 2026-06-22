@@ -66,9 +66,10 @@ use soroban_sdk::{
 };
 use stellar_swipe_common::Asset;
 use timelock::{
-    cancel_queued_action, emergency_execute, execute_multiple_actions, execute_queued_action,
-    extend_execution_window, generate_timelock_analytics, initialize_timelock, queue_action,
-    update_timelock_delay, ActionType, Timelock, TimelockAnalytics,
+    cancel_queued_action, emergency_execute, emergency_unblock_action, execute_multiple_actions,
+    execute_queued_action, extend_execution_window, generate_timelock_analytics, get_queued_action,
+    initialize_timelock, queue_action, update_timelock_delay, ActionType, QueuedAction, Timelock,
+    TimelockAnalytics,
 };
 pub use reputation::{ReputationConfig, ReputationTier, StalenessLevel};
 pub use token::{HolderAnalytics, HolderBalance, TokenMetadata};
@@ -116,6 +117,8 @@ pub enum StorageKey {
     ReputationState,
     VoteRecords,
     ConvictionState,
+    /// Voting-power snapshot taken at proposal creation: Map<Address, i128>.
+    VoteSnapshots(u64),
     /// Global pause flag surfaced by `health_check` (admin-controlled).
     ContractPaused,
     /// Reputation decay and stale-score configuration.
@@ -535,6 +538,22 @@ impl GovernanceContract {
     ) -> Result<(), GovernanceError> {
         require_initialized(&env)?;
         timelock::emergency_execute(&env, action_id, guardian)
+    }
+
+    /// Guardian-only recovery path that retries a queued action which is stuck
+    /// past its execution window due to ledger timing or contract state issues.
+    pub fn emergency_unblock_action(
+        env: Env,
+        action_id: u64,
+        guardian: Address,
+    ) -> Result<(), GovernanceError> {
+        require_initialized(&env)?;
+        timelock::emergency_unblock_action(&env, action_id, guardian)
+    }
+
+    pub fn queued_action(env: Env, action_id: u64) -> Result<QueuedAction, GovernanceError> {
+        require_initialized(&env)?;
+        get_queued_action(&env, action_id)
     }
 
     pub fn timelock_analytics(env: Env) -> Result<TimelockAnalytics, GovernanceError> {
@@ -1680,6 +1699,21 @@ pub(crate) fn track_holder(env: &Env, holder: &Address) {
     }
     holders.push_back(holder.clone());
     put_holders(env, &holders);
+}
+
+pub(crate) fn get_vote_snapshot(env: &Env, proposal_id: u64, voter: &Address) -> Option<i128> {
+    let map: Map<Address, i128> = env
+        .storage()
+        .instance()
+        .get(&StorageKey::VoteSnapshots(proposal_id))
+        .unwrap_or(Map::new(env));
+    map.get(voter.clone())
+}
+
+pub(crate) fn put_vote_snapshots(env: &Env, proposal_id: u64, snapshots: &Map<Address, i128>) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::VoteSnapshots(proposal_id), snapshots);
 }
 
 pub(crate) fn checked_add(left: i128, right: i128) -> Result<i128, GovernanceError> {

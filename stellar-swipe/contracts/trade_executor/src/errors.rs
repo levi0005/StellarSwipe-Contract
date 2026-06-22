@@ -41,17 +41,18 @@ pub enum ContractError {
     OracleNotWhitelisted = 13,
     CannotRemoveLastOracle = 14,
     OpenInterestLimitReached = 15,
-    DCAPlanNotFound = 15,
-    DCAPlanAlreadyExists = 16,
-    SignalExpired = 17,
-    IntervalNotDue = 18,
+    DCAPlanNotFound = 16,
+    DCAPlanAlreadyExists = 17,
+    SignalExpired = 18,
+    IntervalNotDue = 19,
     /// Transient: the network is congested. Caller should read `NetworkErrorDetail`
     /// via [`crate::TradeExecutorContract::get_network_error_detail`] and retry
     /// after `retry_after_ledger`.
-    NetworkCongestion = 19,
+    NetworkCongestion = 20,
     /// The SDEX pair has zero or insufficient liquidity. Check `InsufficientLiquidityDetail`
     /// for available liquidity and required amount. Try again later or reduce trade size.
-    InsufficientLiquidity = 20,
+    InsufficientLiquidity = 21,
+    CircuitBreakerActive = 22,
 }
 
 /// Populated when [`ContractError::InsufficientLiquidity`] is returned.

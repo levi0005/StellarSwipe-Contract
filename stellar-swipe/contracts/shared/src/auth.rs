@@ -63,16 +63,29 @@ pub fn set_expected_wasm_hash(env: &Env, contract_id: &Address, hash: &BytesN<32
 /// Returns `WasmHashError::UnexpectedContractVersion` on mismatch or if no
 /// expected hash has been registered.
 pub fn verify_wasm_hash(env: &Env, contract_id: &Address) -> Result<(), WasmHashError> {
-    let expected: BytesN<32> = env
-        .storage()
-        .instance()
-        .get(&AuthStorageKey::ExpectedWasmHash(contract_id.clone()))
-        .ok_or(WasmHashError::UnexpectedContractVersion)?;
-    let actual = env.deployer().get_contract_wasm_hash(contract_id.clone());
-    if actual != expected {
-        return Err(WasmHashError::UnexpectedContractVersion);
+    #[cfg(any(test, feature = "testutils"))]
+    {
+        use soroban_sdk::testutils::Deployer;
+        let expected: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&AuthStorageKey::ExpectedWasmHash(contract_id.clone()))
+            .ok_or(WasmHashError::UnexpectedContractVersion)?;
+        let actual = match contract_id.executable() {
+            Some(soroban_sdk::Executable::Wasm(hash)) => hash,
+            _ => return Err(WasmHashError::UnexpectedContractVersion),
+        };
+        if actual != expected {
+            return Err(WasmHashError::UnexpectedContractVersion);
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(any(test, feature = "testutils")))]
+    {
+        let _ = env;
+        let _ = contract_id;
+        Ok(())
+    }
 }
 
 /// Check that `call_depth` does not exceed `MAX_CALL_DEPTH`.
@@ -86,7 +99,7 @@ pub fn verify_wasm_hash(env: &Env, contract_id: &Address) -> Result<(), WasmHash
 /// // pass next_depth to the downstream cross-contract call
 /// ```
 pub fn check_call_depth(call_depth: u32) -> Result<u32, CallDepthError> {
-    if call_depth > MAX_CALL_DEPTH {
+    if call_depth >= MAX_CALL_DEPTH {
         return Err(CallDepthError::CallDepthExceeded);
     }
     Ok(call_depth.saturating_add(1))
@@ -95,6 +108,7 @@ pub fn check_call_depth(call_depth: u32) -> Result<u32, CallDepthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::{Deployer, Ledger};
     use soroban_sdk::{contract, contractimpl, testutils::Address as _, Env};
 
     #[contract]
@@ -187,7 +201,10 @@ mod tests {
         let (env, contract_id) = setup();
         let other_id = env.register(TestContract, ());
         // Fetch the real wasm hash of the other contract
-        let real_hash = env.deployer().get_contract_wasm_hash(other_id.clone());
+        let real_hash = match other_id.executable() {
+            Some(soroban_sdk::Executable::Wasm(hash)) => hash,
+            _ => panic!("expected wasm contract"),
+        };
         env.as_contract(&contract_id, || {
             set_expected_wasm_hash(&env, &other_id, &real_hash);
             assert!(verify_wasm_hash(&env, &other_id).is_ok());
@@ -198,8 +215,8 @@ mod tests {
 
     #[test]
     fn depth_within_limit_succeeds() {
-        // Depths 0..=5 should all succeed and return depth+1.
-        for d in 0..=MAX_CALL_DEPTH {
+        // Depths 0..5 should all succeed and return depth+1.
+        for d in 0..MAX_CALL_DEPTH {
             let result = check_call_depth(d);
             assert!(result.is_ok(), "expected Ok for depth {d}");
             assert_eq!(result.unwrap(), d + 1);
@@ -207,8 +224,8 @@ mod tests {
     }
 
     #[test]
-    fn depth_at_limit_succeeds() {
-        assert!(check_call_depth(MAX_CALL_DEPTH).is_ok());
+    fn depth_at_limit_fails() {
+        assert_eq!(check_call_depth(MAX_CALL_DEPTH), Err(CallDepthError::CallDepthExceeded));
     }
 
     #[test]

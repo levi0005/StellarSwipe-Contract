@@ -204,12 +204,22 @@ pub fn relay_message_to_target_chain(
 }
 
 /// Confirm that the message was executed on the target chain.
+/// `relayer` must be an authorized validator for the target chain's bridge.
 pub fn confirm_message_delivery(
     env: &Env,
     message_id: u64,
+    relayer: Address,
     delivery_proof: Bytes,
 ) -> Result<(), String> {
+    relayer.require_auth();
+
     let mut msg = get_message(env, message_id)?;
+
+    let bridge_id = bridge_id_for_chain(env, msg.target_chain)?;
+    let validators = get_bridge_validators(env, bridge_id)?;
+    if !validators.contains(&relayer) {
+        return Err(String::from_str(env, "Not authorized validator"));
+    }
 
     if msg.status != MessageStatus::Relayed {
         return Err(String::from_str(env, "Message not relayed"));
@@ -233,13 +243,23 @@ pub fn confirm_message_delivery(
 }
 
 /// Receive a callback from the target chain after message execution.
+/// `relayer` must be an authorized validator for the target chain's bridge.
 pub fn receive_message_callback(
     env: &Env,
     original_message_id: u64,
+    relayer: Address,
     callback_payload: Bytes,
     callback_proof: Bytes,
 ) -> Result<(), String> {
+    relayer.require_auth();
+
     let mut msg = get_message(env, original_message_id)?;
+
+    let bridge_id = bridge_id_for_chain(env, msg.target_chain)?;
+    let validators = get_bridge_validators(env, bridge_id)?;
+    if !validators.contains(&relayer) {
+        return Err(String::from_str(env, "Not authorized validator"));
+    }
 
     if !msg.callback_required {
         return Err(String::from_str(env, "Callback not expected"));
@@ -529,8 +549,9 @@ mod tests {
         )
         .unwrap();
 
-        relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
-        confirm_message_delivery(&env, id, proof(&env)).unwrap();
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
+        confirm_message_delivery(&env, id, validator, proof(&env)).unwrap();
         assert!(get_cross_chain_message(&env, id).is_none());
     }
 
@@ -548,8 +569,9 @@ mod tests {
         )
         .unwrap();
 
-        relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
-        confirm_message_delivery(&env, id, proof(&env)).unwrap();
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
+        confirm_message_delivery(&env, id, validator, proof(&env)).unwrap();
 
         let msg = get_cross_chain_message(&env, id).unwrap();
         assert_eq!(msg.status, MessageStatus::Delivered);
@@ -570,13 +592,14 @@ mod tests {
         )
         .unwrap();
 
-        relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
-        assert!(confirm_message_delivery(&env, id, empty(&env)).is_err());
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
+        assert!(confirm_message_delivery(&env, id, validator, empty(&env)).is_err());
     }
 
     #[test]
     fn test_confirm_delivery_without_relay_fails() {
-        let (env, sender, _) = setup();
+        let (env, sender, validators) = setup();
         let id = send_cross_chain_message(
             &env,
             sender,
@@ -587,7 +610,28 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(confirm_message_delivery(&env, id, proof(&env)).is_err());
+        assert!(confirm_message_delivery(&env, id, validators.get(0).unwrap(), proof(&env)).is_err());
+    }
+
+    #[test]
+    fn test_confirm_delivery_unauthorized_relayer_fails() {
+        let (env, sender, validators) = setup();
+        let id = send_cross_chain_message(
+            &env,
+            sender,
+            ChainId::Ethereum,
+            target(&env),
+            payload(&env),
+            100_000,
+            false,
+        )
+        .unwrap();
+
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator, proof(&env)).unwrap();
+
+        let rogue = Address::generate(&env);
+        assert!(confirm_message_delivery(&env, id, rogue, proof(&env)).is_err());
     }
 
     // ── callback ──────────────────────────────────────────────────────────────
@@ -606,9 +650,10 @@ mod tests {
         )
         .unwrap();
 
-        relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
-        confirm_message_delivery(&env, id, proof(&env)).unwrap();
-        receive_message_callback(&env, id, payload(&env), proof(&env)).unwrap();
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
+        confirm_message_delivery(&env, id, validator.clone(), proof(&env)).unwrap();
+        receive_message_callback(&env, id, validator, payload(&env), proof(&env)).unwrap();
         assert!(get_cross_chain_message(&env, id).is_none());
     }
 
@@ -626,7 +671,8 @@ mod tests {
         )
         .unwrap();
 
-        relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
 
         // Manually force Delivered state without callback_required
         let mut msg = get_cross_chain_message(&env, id).unwrap();
@@ -635,7 +681,7 @@ mod tests {
             .persistent()
             .set(&MessagingKey::Message(id), &msg);
 
-        assert!(receive_message_callback(&env, id, payload(&env), proof(&env)).is_err());
+        assert!(receive_message_callback(&env, id, validator, payload(&env), proof(&env)).is_err());
     }
 
     #[test]
@@ -652,9 +698,10 @@ mod tests {
         )
         .unwrap();
 
-        relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
         // Skip confirm_message_delivery
-        assert!(receive_message_callback(&env, id, payload(&env), proof(&env)).is_err());
+        assert!(receive_message_callback(&env, id, validator, payload(&env), proof(&env)).is_err());
     }
 
     #[test]
@@ -671,9 +718,32 @@ mod tests {
         )
         .unwrap();
 
-        relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
-        confirm_message_delivery(&env, id, proof(&env)).unwrap();
-        assert!(receive_message_callback(&env, id, payload(&env), empty(&env)).is_err());
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
+        confirm_message_delivery(&env, id, validator.clone(), proof(&env)).unwrap();
+        assert!(receive_message_callback(&env, id, validator, payload(&env), empty(&env)).is_err());
+    }
+
+    #[test]
+    fn test_callback_unauthorized_relayer_fails() {
+        let (env, sender, validators) = setup();
+        let id = send_cross_chain_message(
+            &env,
+            sender,
+            ChainId::Ethereum,
+            target(&env),
+            payload(&env),
+            100_000,
+            true,
+        )
+        .unwrap();
+
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
+        confirm_message_delivery(&env, id, validator, proof(&env)).unwrap();
+
+        let rogue = Address::generate(&env);
+        assert!(receive_message_callback(&env, id, rogue, payload(&env), proof(&env)).is_err());
     }
 
     // ── retry ─────────────────────────────────────────────────────────────────
@@ -737,7 +807,7 @@ mod tests {
         .unwrap();
 
         relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
-        confirm_message_delivery(&env, id, proof(&env)).unwrap();
+        confirm_message_delivery(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
         // Message was cleaned up (no callback), so get returns None — mark_failed should error
         assert!(mark_message_failed(&env, id).is_err());
     }
@@ -798,19 +868,20 @@ mod tests {
         )
         .unwrap();
 
-        relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
+        let validator = validators.get(0).unwrap();
+        relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
         assert_eq!(
             get_cross_chain_message(&env, id).unwrap().status,
             MessageStatus::Relayed
         );
 
-        confirm_message_delivery(&env, id, proof(&env)).unwrap();
+        confirm_message_delivery(&env, id, validator.clone(), proof(&env)).unwrap();
         assert_eq!(
             get_cross_chain_message(&env, id).unwrap().status,
             MessageStatus::Delivered
         );
 
-        receive_message_callback(&env, id, payload(&env), proof(&env)).unwrap();
+        receive_message_callback(&env, id, validator, payload(&env), proof(&env)).unwrap();
         assert!(get_cross_chain_message(&env, id).is_none());
     }
 
@@ -837,7 +908,7 @@ mod tests {
         );
 
         relay_message_to_target_chain(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
-        confirm_message_delivery(&env, id, proof(&env)).unwrap();
+        confirm_message_delivery(&env, id, validators.get(0).unwrap(), proof(&env)).unwrap();
         assert!(get_cross_chain_message(&env, id).is_none());
     }
 
@@ -863,7 +934,7 @@ mod tests {
 
         for id in ids.iter() {
             relay_message_to_target_chain(&env, id, validator.clone(), proof(&env)).unwrap();
-            confirm_message_delivery(&env, id, proof(&env)).unwrap();
+            confirm_message_delivery(&env, id, validator.clone(), proof(&env)).unwrap();
             assert!(get_cross_chain_message(&env, id).is_none());
         }
     }

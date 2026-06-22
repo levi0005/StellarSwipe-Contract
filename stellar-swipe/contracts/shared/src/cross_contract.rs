@@ -176,7 +176,7 @@ pub fn send_cross_contract_message(
 
     save_message(env, &message);
     publish_message_event(env, Symbol::new(env, "msg_sent"), &message);
-    Ok(next_depth)
+    Ok(id)
 }
 
 pub fn acknowledge_message_delivery(
@@ -238,31 +238,51 @@ mod tests {
         pub fn register_caller(env: Env, target: Address, caller: Address) {
             register_authorized_caller(&env, &caller, &target, &caller).unwrap();
         }
+
+        pub fn test_send_message(
+            env: Env,
+            sender: Address,
+            target_contract: Address,
+            operation: String,
+            payload: Bytes,
+            callback_required: bool,
+            call_depth: u32,
+        ) -> Result<u64, CrossContractError> {
+            send_cross_contract_message(
+                &env,
+                &sender,
+                &target_contract,
+                operation,
+                payload,
+                callback_required,
+                call_depth,
+            )
+        }
     }
 
-    fn setup() -> (Env, Address, Address) {
+    fn setup() -> (Env, Address, Address, Address) {
         let env = Env::default();
-        let source = Address::random(&env);
-        let target = Address::random(&env);
-        (env, source, target)
+        env.mock_all_auths();
+        let source_id = env.register(TestContract, ());
+        let target = Address::generate(&env);
+        let user = Address::generate(&env);
+        (env, source_id, target, user)
     }
 
     #[test]
     fn send_message_sets_pending_status() {
-        let (env, source, target) = setup();
-        env.as_contract(&env.register(TestContract, ()), || {
-            env.mock_all_auths();
-            let payload = Bytes::from_array(&env, &[1, 2, 3, 4]);
-            let id = send_cross_contract_message(
-                &env,
-                &source,
-                &target,
-                String::from_str(&env, "transfer"),
-                payload.clone(),
-                false,
-                0,
-            )
-            .unwrap();
+        let (env, source_id, target, user) = setup();
+        let source_client = TestContractClient::new(&env, &source_id);
+        let payload = Bytes::from_array(&env, &[1, 2, 3, 4]);
+        let id = source_client.test_send_message(
+            &user,
+            &target,
+            &String::from_str(&env, "transfer"),
+            &payload,
+            &false,
+            &0,
+        );
+        env.as_contract(&source_id, || {
             let message = get_message(&env, id).unwrap();
             assert_eq!(message.status, MessageStatus::Pending);
             assert_eq!(message.payload, payload);
@@ -271,33 +291,27 @@ mod tests {
 
     #[test]
     fn send_message_rejects_oversize_payload() {
-        let (env, source, target) = setup();
-        env.as_contract(&env.register(TestContract, ()), || {
-            env.mock_all_auths();
-            let payload = Bytes::from_array(&env, &[0u8; (MAX_MESSAGE_SIZE + 1) as usize]);
-            assert_eq!(
-                send_cross_contract_message(
-                    &env,
-                    &source,
-                    &target,
-                    String::from_str(&env, "call"),
-                    payload,
-                    false,
-                    0,
-                ),
-                Err(CrossContractError::InvalidPayload)
-            );
-        });
+        let (env, source_id, target, user) = setup();
+        let source_client = TestContractClient::new(&env, &source_id);
+        let payload = Bytes::from_array(&env, &[0u8; (MAX_MESSAGE_SIZE + 1) as usize]);
+        let result = source_client.try_test_send_message(
+            &user,
+            &target,
+            &String::from_str(&env, "call"),
+            &payload,
+            &false,
+            &0,
+        );
+        assert_eq!(result, Err(Ok(CrossContractError::InvalidPayload)));
     }
 
     #[test]
     fn authorized_caller_registration_and_validation() {
-        let (env, source, target) = setup();
-        env.as_contract(&env.register(TestContract, ()), || {
-            env.mock_all_auths();
-            let caller = Address::random(&env);
-            register_authorized_caller(&env, &source, &target, &caller).unwrap();
-            assert_eq!(authorize_caller(&env, &target, &caller), Ok(()));
+        let (env, source_id, target, user) = setup();
+        let source_client = TestContractClient::new(&env, &source_id);
+        source_client.register_caller(&target, &user);
+        env.as_contract(&source_id, || {
+            assert_eq!(authorize_caller(&env, &target, &user), Ok(()));
         });
     }
 
@@ -305,15 +319,13 @@ mod tests {
     fn validate_callee_version_fails_when_incompatible() {
         let env = Env::default();
         let v_contract = env.register(VersionedContract, ());
-        env.as_contract(&v_contract, || {
-            let result = validate_callee_version(&env, &Address::Contract(v_contract.clone()), crate::version::ContractKind::SignalRegistry);
-            assert_eq!(result, Err(CrossContractError::VersionMismatch));
-        });
+        let result = validate_callee_version(&env, &v_contract, crate::version::ContractKind::SignalRegistry);
+        assert_eq!(result, Err(CrossContractError::VersionMismatch));
     }
 
     #[test]
     fn call_depth_limit_is_enforced() {
-        assert_eq!(check_call_depth(MAX_CALL_DEPTH).map_err(|_| CrossContractError::CallDepthExceeded), Ok(MAX_CALL_DEPTH + 1));
-        assert_eq!(check_call_depth(MAX_CALL_DEPTH + 1).map_err(|_| CrossContractError::CallDepthExceeded), Err(CrossContractError::CallDepthExceeded));
+        assert_eq!(check_call_depth(MAX_CALL_DEPTH - 1).map_err(|_| CrossContractError::CallDepthExceeded), Ok(MAX_CALL_DEPTH));
+        assert_eq!(check_call_depth(MAX_CALL_DEPTH).map_err(|_| CrossContractError::CallDepthExceeded), Err(CrossContractError::CallDepthExceeded));
     }
 }
