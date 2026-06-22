@@ -55,6 +55,10 @@ pub enum StorageKey {
     DCAPlan(Address, u64),
     /// Set when fee fallback was used for a trade: stores the fee amount deducted from received.
     FeeDeductedFromReceived(Address, u64),
+    CircuitBreakerActive,
+    CircuitBreakerLedger,
+    MaxOpenInterestPerPair,
+    OpenInterestPerPair(Address),
 }
 
 /// Temporary-storage key for the reentrancy lock on `execute_copy_trade`.
@@ -128,6 +132,119 @@ fn require_admin(env: &Env) -> Result<Address, ContractError> {
     oracle::require_admin(env)
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitBreakerActivated {
+    pub activated_by: Address,
+    pub activated_ledger: u32,
+    pub expires_ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitBreakerReset {
+    pub reset_ledger: u32,
+}
+
+fn emit_circuit_breaker_activated(env: &Env, activated_by: Address, activated_ledger: u32) {
+    env.events().publish(
+        (
+            Symbol::new(env, "trade_executor"),
+            Symbol::new(env, "circuit_breaker_activated"),
+        ),
+        CircuitBreakerActivated {
+            activated_by,
+            activated_ledger,
+            expires_ledger: activated_ledger.saturating_add(CIRCUIT_BREAKER_DURATION_LEDGERS),
+        },
+    );
+}
+
+fn emit_circuit_breaker_reset(env: &Env) {
+    env.events().publish(
+        (
+            Symbol::new(env, "trade_executor"),
+            Symbol::new(env, "circuit_breaker_reset"),
+        ),
+        CircuitBreakerReset {
+            reset_ledger: env.ledger().sequence(),
+        },
+    );
+}
+
+fn reset_circuit_breaker(env: &Env) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::CircuitBreakerActive, &false);
+    env.storage()
+        .instance()
+        .remove(&StorageKey::CircuitBreakerLedger);
+    emit_circuit_breaker_reset(env);
+}
+
+fn market_circuit_breaker_active(env: &Env) -> bool {
+    let active = env
+        .storage()
+        .instance()
+        .get(&StorageKey::CircuitBreakerActive)
+        .unwrap_or(false);
+    if !active {
+        return false;
+    }
+
+    let activated_ledger = env
+        .storage()
+        .instance()
+        .get(&StorageKey::CircuitBreakerLedger)
+        .unwrap_or(env.ledger().sequence());
+    if env.ledger().sequence().saturating_sub(activated_ledger) >= CIRCUIT_BREAKER_DURATION_LEDGERS
+    {
+        reset_circuit_breaker(env);
+        return false;
+    }
+
+    true
+}
+
+fn open_interest_for_pair(env: &Env, pair: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::OpenInterestPerPair(pair.clone()))
+        .unwrap_or(0)
+}
+
+fn check_open_interest_limit(env: &Env, pair: &Address, amount: i128) -> Result<(), ContractError> {
+    let max_open_interest = env
+        .storage()
+        .instance()
+        .get(&StorageKey::MaxOpenInterestPerPair)
+        .unwrap_or(0);
+    if max_open_interest <= 0 {
+        return Ok(());
+    }
+
+    let current = open_interest_for_pair(env, pair);
+    let next = current.checked_add(amount).unwrap_or(i128::MAX);
+    if next > max_open_interest {
+        return Err(ContractError::OpenInterestLimitReached);
+    }
+    Ok(())
+}
+
+fn increase_open_interest(env: &Env, pair: &Address, amount: i128) {
+    let key = StorageKey::OpenInterestPerPair(pair.clone());
+    let current = open_interest_for_pair(env, pair);
+    let next = current.checked_add(amount).unwrap_or(i128::MAX);
+    env.storage().instance().set(&key, &next);
+}
+
+fn decrease_open_interest(env: &Env, pair: &Address, amount: i128) {
+    let key = StorageKey::OpenInterestPerPair(pair.clone());
+    let current = open_interest_for_pair(env, pair);
+    let next = current.saturating_sub(amount).max(0);
+    env.storage().instance().set(&key, &next);
+}
+
 fn execute_market_copy_trade(
     env: &Env,
     user: Address,
@@ -143,6 +260,11 @@ fn execute_market_copy_trade(
     if amount <= 0 {
         return Err(ContractError::InvalidAmount);
     }
+
+    if market_circuit_breaker_active(env) {
+        return Err(ContractError::CircuitBreakerActive);
+    }
+    check_open_interest_limit(env, &token, amount)?;
 
     // ── Reentrancy guard ──────────────────────────────────────────────────
     let lock_key = Symbol::new(env, EXECUTION_LOCK);
@@ -209,21 +331,59 @@ fn execute_market_copy_trade(
     // ── Cross-contract call #1: SEP-41 balance check ──────────────────────
     let fee = effective_estimated_fee(env);
     let bal_key = StorageKey::LastInsufficientBalance(user.clone());
-    match check_user_balance(env, &user, &token, effective_amount, fee) {
+    let use_fee_fallback = match check_user_balance(env, &user, &token, effective_amount, fee) {
         Ok(()) => {
             env.storage().instance().remove(&bal_key);
+            false
         }
         Err(detail) => {
-            env.storage().instance().set(&bal_key, &detail);
-            env.storage().temporary().remove(&lock_key);
-            return Err(ContractError::InsufficientBalance);
+            // Primary failed. Check if user has enough for just the amount (no fee).
+            match check_user_balance(env, &user, &token, effective_amount, 0) {
+                Ok(()) => {
+                    // User has enough for the trade but not the fee — use fallback.
+                    env.storage().instance().remove(&bal_key);
+                    true
+                }
+                Err(_) => {
+                    // User doesn't even have enough for the trade amount.
+                    env.storage().instance().set(&bal_key, &detail);
+                    env.storage().temporary().remove(&lock_key);
+                    return Err(ContractError::InsufficientBalance);
+                }
+            }
         }
-    }
+    };
 
     // ── Cross-contract call #2: batched position-limit check + record ─────
     if let Err(e) = validate_and_record_position(env, &portfolio, &user, exempt) {
         env.storage().temporary().remove(&lock_key);
         return Err(e);
+    }
+
+    increase_open_interest(env, &token, amount);
+
+    // If fallback was used, emit the FeeDeductedFromReceived event.
+    // The trade_id is the current position count (used as a proxy identifier).
+    if use_fee_fallback && fee > 0 {
+        // Use a monotonic counter stored per user as a trade_id proxy.
+        let trade_id_key = StorageKey::FeeDeductedFromReceived(user.clone(), 0);
+        let trade_id: u64 = env
+            .storage()
+            .instance()
+            .get(&trade_id_key)
+            .unwrap_or(0u64)
+            .saturating_add(1);
+        env.storage().instance().set(&trade_id_key, &trade_id);
+
+        shared::events::emit_fee_deducted_from_received(
+            env,
+            shared::events::EvtFeeDeductedFromReceived {
+                schema_version: shared::events::SCHEMA_VERSION,
+                user: user.clone(),
+                fee_amount: fee,
+                trade_id,
+            },
+        );
     }
 
     env.storage().temporary().remove(&lock_key);
@@ -652,35 +812,6 @@ impl TradeExecutorContract {
                 continue;
             };
 
-        // ── Cross-contract call #1: SEP-41 balance check ──────────────────────
-        let fee = effective_estimated_fee(&env);
-        let bal_key = StorageKey::LastInsufficientBalance(user.clone());
-
-        // Primary: try to deduct fee upfront (user has amount + fee).
-        // Fallback: if primary fails but user has at least `amount`, proceed and
-        // deduct fee from received tokens after the trade.
-        let use_fee_fallback = match check_user_balance(&env, &user, &token, effective_amount, fee) {
-            Ok(()) => {
-                env.storage().instance().remove(&bal_key);
-                false
-            }
-            Err(detail) => {
-                // Primary failed. Check if user has enough for just the amount (no fee).
-                match check_user_balance(&env, &user, &token, effective_amount, 0) {
-                    Ok(()) => {
-                        // User has enough for the trade but not the fee — use fallback.
-                        env.storage().instance().remove(&bal_key);
-                        true
-                    }
-                    Err(_) => {
-                        // User doesn't even have enough for the trade amount.
-                        env.storage().instance().set(&bal_key, &detail);
-                        env.storage().temporary().remove(&lock_key);
-                        return Err(ContractError::InsufficientBalance);
-                    }
-                }
-            }
-        };
             if order.token != token {
                 next_ids.push_back(order_id);
                 continue;
@@ -712,32 +843,6 @@ impl TradeExecutorContract {
             }
         }
 
-        // If fallback was used, emit the FeeDeductedFromReceived event.
-        // The trade_id is the current position count (used as a proxy identifier).
-        if use_fee_fallback && fee > 0 {
-            // Use a monotonic counter stored per user as a trade_id proxy.
-            let trade_id_key = StorageKey::FeeDeductedFromReceived(user.clone(), 0);
-            let trade_id: u64 = env
-                .storage()
-                .instance()
-                .get(&trade_id_key)
-                .unwrap_or(0u64)
-                .saturating_add(1);
-            env.storage().instance().set(&trade_id_key, &trade_id);
-
-            shared::events::emit_fee_deducted_from_received(
-                &env,
-                shared::events::EvtFeeDeductedFromReceived {
-                    schema_version: shared::events::SCHEMA_VERSION,
-                    user: user.clone(),
-                    fee_amount: fee,
-                    trade_id,
-                },
-            );
-        }
-
-        env.storage().temporary().remove(&lock_key);
-        Ok(())
         set_pending_order_ids(&env, &next_ids);
         Ok(processed)
     }

@@ -9,11 +9,11 @@ use crate::{
         MAX_POSITIONS_PER_USER, MAX_POSITION_PCT_BPS,
     },
     sdex::{self, execute_sdex_swap},
-    TradeExecutorContract, TradeExecutorContractClient,
+    TradeExecutorContract, TradeExecutorContractClient, OrderType,
 };
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short,
-    testutils::{Address as _, Events},
+    testutils::{Address as _, Events, Ledger as _},
     token::{self, StellarAssetClient},
     Address, Env, MuxedAddress, TryFromVal,
 };
@@ -197,7 +197,7 @@ fn check_user_balance_more_than_sufficient() {
 #[test]
 fn execute_copy_trade_insufficient_balance_sets_detail() {
     let required = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
-    let (env, exec_id, _pf, user, _admin, token) = setup_with_balance(required - 1);
+    let (env, exec_id, _pf, user, _admin, token) = setup_with_balance(TRADE_AMOUNT - 1);
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
 
     let err = env.as_contract(&exec_id, || {
@@ -206,6 +206,8 @@ fn execute_copy_trade_insufficient_balance_sets_detail() {
             user.clone(),
             token.clone(),
             TRADE_AMOUNT,
+            None,
+            OrderType::Market,
             None,
         )
     });
@@ -216,7 +218,7 @@ fn execute_copy_trade_insufficient_balance_sets_detail() {
         detail,
         InsufficientBalanceDetail {
             required,
-            available: required - 1,
+            available: TRADE_AMOUNT - 1,
         }
     );
 }
@@ -226,7 +228,7 @@ fn execute_copy_trade_sufficient_balance_invokes_portfolio() {
     let per = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
     let (env, exec_id, portfolio_id, user, _admin, token) = setup_with_balance(per + 1_000_000);
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
     assert!(exec.get_insufficient_balance_detail(&user).is_none());
     assert_eq!(
         MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
@@ -238,7 +240,7 @@ fn execute_copy_trade_sufficient_balance_invokes_portfolio() {
 fn execute_copy_trade_zero_amount_invalid() {
     let (env, exec_id, _pf, user, _admin, token) = setup_with_balance(1_000_000_000);
     let err = env.as_contract(&exec_id, || {
-        TradeExecutorContract::execute_copy_trade(env.clone(), user.clone(), token.clone(), 0, None)
+        TradeExecutorContract::execute_copy_trade(env.clone(), user.clone(), token.clone(), 0, None, OrderType::Market, None)
     });
     assert_eq!(err, Err(ContractError::InvalidAmount));
 }
@@ -251,14 +253,14 @@ fn twenty_first_copy_trade_fails_until_one_closed() {
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
 
     for _ in 0..MAX_POSITIONS_PER_USER {
-        exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+        exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
     }
 
-    let err = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+    let err = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
     assert_eq!(err, Err(Ok(ContractError::PositionLimitReached)));
 
     MockUserPortfolioClient::new(&env, &portfolio_id).close_one_copy_position(&user);
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
 
     assert_eq!(
         MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
@@ -274,16 +276,16 @@ fn whitelisted_user_bypasses_position_limit() {
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
 
     for _ in 0..MAX_POSITIONS_PER_USER {
-        exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+        exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
     }
 
-    let err = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+    let err = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
     assert_eq!(err, Err(Ok(ContractError::PositionLimitReached)));
 
     exec.set_position_limit_exempt(&user, &true);
     assert!(exec.is_position_limit_exempt(&user));
 
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
     assert_eq!(
         MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
         MAX_POSITIONS_PER_USER + 1
@@ -292,7 +294,7 @@ fn whitelisted_user_bypasses_position_limit() {
     exec.set_position_limit_exempt(&user, &false);
     assert!(!exec.is_position_limit_exempt(&user));
 
-    let err2 = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+    let err2 = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
     assert_eq!(err2, Err(Ok(ContractError::PositionLimitReached)));
 }
 
@@ -320,7 +322,7 @@ impl ReentrantPortfolio {
         // Attempt reentrant call — must be blocked.
         let token = Address::generate(&env); // dummy token; balance check will fail first
         let client = TradeExecutorContractClient::new(&env, &exec);
-        let result = client.try_execute_copy_trade(&user, &token, &1_000_000i128, &None::<u32>);
+        let result = client.try_execute_copy_trade(&user, &token, &1_000_000i128, &None::<u32>, &OrderType::Market, &None);
         let blocked = matches!(result, Err(Ok(ContractError::ReentrancyDetected)));
         env.storage()
             .instance()
@@ -360,7 +362,7 @@ fn reentrant_call_returns_reentrancy_detected() {
     ReentrantPortfolioClient::new(&env, &portfolio_id).set_executor(&exec_id);
     ReentrantPortfolioClient::new(&env, &portfolio_id).set_user(&user);
 
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
     assert!(
         ReentrantPortfolioClient::new(&env, &portfolio_id).was_blocked(),
         "expected reentrant inner call to be blocked"
@@ -386,8 +388,8 @@ fn lock_cleared_after_successful_execution() {
     exec.set_user_portfolio(&portfolio_id);
 
     // Two sequential calls must both succeed (lock is cleared between them).
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>, &OrderType::Market, &None);
 
     assert_eq!(
         MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
@@ -482,6 +484,14 @@ pub struct MockSdexRouter;
 
 #[contractimpl]
 impl MockSdexRouter {
+    pub fn get_best_ask(
+        _env: Env,
+        _from_token: Address,
+        _to_token: Address,
+    ) -> (i128, i128) {
+        (0, 10_000_000_000i128)
+    }
+
     pub fn set_amount_out(env: Env, out: i128) {
         env.storage().instance().set(&symbol_short!("amtout"), &out);
     }
@@ -810,7 +820,7 @@ fn setup_with_limit(limit: i128) -> (Env, Address, Address, Address, Address) {
 fn volume_limit_zero_means_no_restriction() {
     let (env, exec_id, user, _admin, token) = setup_with_limit(0);
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Market, &None);
 }
 
 /// Trade under the daily limit succeeds.
@@ -818,7 +828,7 @@ fn volume_limit_zero_means_no_restriction() {
 fn volume_under_limit_succeeds() {
     let (env, exec_id, user, _admin, token) = setup_with_limit(TRADE_AMOUNT * 2);
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Market, &None);
 }
 
 /// Trade exactly at the daily limit succeeds.
@@ -826,7 +836,7 @@ fn volume_under_limit_succeeds() {
 fn volume_at_limit_succeeds() {
     let (env, exec_id, user, _admin, token) = setup_with_limit(TRADE_AMOUNT);
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Market, &None);
 }
 
 /// Trade that would exceed the daily limit returns DailyVolumeLimitExceeded.
@@ -834,7 +844,7 @@ fn volume_at_limit_succeeds() {
 fn volume_over_limit_returns_error() {
     let (env, exec_id, user, _admin, token) = setup_with_limit(TRADE_AMOUNT - 1);
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    let result = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None);
+    let result = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Market, &None);
     assert_eq!(result, Err(Ok(ContractError::DailyVolumeLimitExceeded)));
 }
 
@@ -846,13 +856,13 @@ fn volume_resets_on_new_day() {
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
 
     // Day 0: use up the full limit.
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Market, &None);
 
     // Advance to day 1.
     env.ledger().with_mut(|l| l.timestamp = 86_400);
 
     // Day 1: limit resets — trade should succeed again.
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Market, &None);
 }
 
 // ── Issue #390: fee fallback tests ───────────────────────────────────────────
@@ -879,7 +889,7 @@ fn primary_fee_deduction_succeeds_with_sufficient_balance() {
     exec.set_user_portfolio(&portfolio_id);
 
     // Should succeed — no fallback needed.
-    let result = exec.try_execute_copy_trade(&user, &token, &amount, &None);
+    let result = exec.try_execute_copy_trade(&user, &token, &amount, &None, &OrderType::Market, &None);
     assert!(result.is_ok(), "primary fee deduction should succeed");
 
     // No fee_from_received event should be emitted.
@@ -917,7 +927,7 @@ fn fee_fallback_activates_when_only_amount_available() {
     exec.set_copy_trade_estimated_fee(&1_000i128);
 
     // Trade should still succeed via fallback.
-    let result = exec.try_execute_copy_trade(&user, &token, &amount, &None);
+    let result = exec.try_execute_copy_trade(&user, &token, &amount, &None, &OrderType::Market, &None);
     assert!(result.is_ok(), "trade should succeed via fee fallback");
 
     // fee_from_received event must be emitted.
@@ -951,6 +961,136 @@ fn trade_fails_when_balance_below_amount() {
     exec.initialize(&admin);
     exec.set_user_portfolio(&portfolio_id);
 
-    let result = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None);
+    let result = exec.try_execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Market, &None);
     assert_eq!(result, Err(Ok(ContractError::InsufficientBalance)));
+}
+
+// ── Issue #623: pending limit orders execution & expiration tests ────────────────
+
+#[test]
+fn test_limit_order_execution() {
+    let (env, exec_id, portfolio_id, user, _admin, token) = setup_with_balance(10_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    // Initial sequence number
+    env.ledger().with_mut(|l| l.sequence_number = 10);
+
+    // Place a limit order: limit_price = 10_000, amount = TRADE_AMOUNT
+    exec.execute_copy_trade(
+        &user,
+        &token,
+        &TRADE_AMOUNT,
+        &None,
+        &OrderType::Limit,
+        &Some(10_000i128),
+    );
+
+    // Verify order is stored
+    let order_ids = exec.get_pending_limit_order_ids();
+    assert_eq!(order_ids.len(), 1);
+    let order_id = order_ids.get(0).unwrap();
+    let order = exec.get_pending_limit_order(&order_id).unwrap();
+    assert_eq!(order.limit_price, 10_000);
+    assert_eq!(order.amount, TRADE_AMOUNT);
+
+    // Set SDEX price higher than limit price -> check should NOT execute
+    exec.set_sdex_price(&token, &11_000i128);
+    let processed = exec.check_pending_limit_orders(&token);
+    assert_eq!(processed, 0);
+
+    // The order should still be pending
+    assert_eq!(exec.get_pending_limit_order_ids().len(), 1);
+
+    // Set SDEX price to limit price -> check should execute
+    exec.set_sdex_price(&token, &10_000i128);
+    let processed = exec.check_pending_limit_orders(&token);
+    assert_eq!(processed, 1);
+
+    // Order should be removed from pending list
+    assert_eq!(exec.get_pending_limit_order_ids().len(), 0);
+    assert!(exec.get_pending_limit_order(&order_id).is_none());
+
+    // User portfolio should now have recorded a position (open_position_count == 1)
+    let mock = MockUserPortfolioClient::new(&env, &portfolio_id);
+    assert_eq!(mock.get_open_position_count(&user), 1);
+}
+
+#[test]
+fn test_limit_order_expiration() {
+    let (env, exec_id, portfolio_id, user, _admin, token) = setup_with_balance(10_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    env.ledger().with_mut(|l| l.sequence_number = 10);
+
+    // Place a limit order: limit_price = 10_000, amount = TRADE_AMOUNT
+    exec.execute_copy_trade(
+        &user,
+        &token,
+        &TRADE_AMOUNT,
+        &None,
+        &OrderType::Limit,
+        &Some(10_000i128),
+    );
+
+    let order_ids = exec.get_pending_limit_order_ids();
+    assert_eq!(order_ids.len(), 1);
+    let order_id = order_ids.get(0).unwrap();
+
+    // Advance sequence number beyond the expiration sequence (10 + 120 = 130)
+    use soroban_sdk::testutils::Ledger;
+    env.ledger().with_mut(|l| l.sequence_number = 131);
+
+    // Set SDEX price to 10_000 (which would otherwise execute)
+    exec.set_sdex_price(&token, &10_000i128);
+
+    // Call check_pending_limit_orders -> should expire, NOT execute
+    let processed = exec.check_pending_limit_orders(&token);
+    assert_eq!(processed, 1);
+
+    // Order should be removed from pending
+    assert_eq!(exec.get_pending_limit_order_ids().len(), 0);
+    assert!(exec.get_pending_limit_order(&order_id).is_none());
+
+    // Verify it did NOT record a position in the portfolio
+    let mock = MockUserPortfolioClient::new(&env, &portfolio_id);
+    assert_eq!(mock.get_open_position_count(&user), 0);
+}
+
+#[test]
+fn test_limit_order_persistence() {
+    let (env, exec_id, portfolio_id, user, _admin, token) = setup_with_balance(10_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    env.ledger().with_mut(|l| l.sequence_number = 10);
+
+    // Place three limit orders with different limit prices:
+    // Order 1: limit_price = 10_000
+    // Order 2: limit_price = 9_000
+    // Order 3: limit_price = 8_000
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Limit, &Some(10_000i128));
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Limit, &Some(9_000i128));
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None, &OrderType::Limit, &Some(8_000i128));
+
+    let initial_ids = exec.get_pending_limit_order_ids();
+    assert_eq!(initial_ids.len(), 3);
+
+    // Set SDEX price to 9_000.
+    // Order 1 (limit 10_000) and Order 2 (limit 9_000) should execute.
+    // Order 3 (limit 8_000) should NOT execute (9_000 > 8_000).
+    exec.set_sdex_price(&token, &9_000i128);
+
+    let processed = exec.check_pending_limit_orders(&token);
+    assert_eq!(processed, 2);
+
+    // The remaining pending list should contain only Order 3
+    let remaining_ids = exec.get_pending_limit_order_ids();
+    assert_eq!(remaining_ids.len(), 1);
+
+    let last_order_id = remaining_ids.get(0).unwrap();
+    let last_order = exec.get_pending_limit_order(&last_order_id).unwrap();
+    assert_eq!(last_order.limit_price, 8_000);
+
+    // Portfolio should have 2 recorded positions
+    let mock = MockUserPortfolioClient::new(&env, &portfolio_id);
+    assert_eq!(mock.get_open_position_count(&user), 2);
 }
