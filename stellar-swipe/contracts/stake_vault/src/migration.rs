@@ -433,7 +433,9 @@ mod tests {
         admin: &Address,
         batch_size: u32,
     ) -> Result<MigrationBatchResult, MigrationError> {
-        env.as_contract(contract_addr, || migrate_stakes_v1_to_v2(env, admin, batch_size))
+        env.as_contract(contract_addr, || {
+            migrate_stakes_v1_to_v2(env, admin, batch_size)
+        })
     }
 
     /// Seed 50 providers into V1 and migrate them in two batches.
