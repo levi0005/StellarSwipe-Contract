@@ -715,8 +715,8 @@ fn pre_upgrade_validation_checks_state_before_upgrade() {
     );
 
     // Validate pre-upgrade state before re-registering V2.
-    assert!(v1.get_position(tid.clone()).is_some());
-    assert!(v1.get_auth(user.clone()).unwrap().authorized);
+    assert!(v1.get_position(&tid).is_some());
+    assert!(v1.get_auth(&user).unwrap().authorized);
 
     env.register_at(&cid, ContractV2, ());
     let v2 = ContractV2Client::new(&env, &cid);

@@ -400,33 +400,29 @@ mod tests {
         let tags = Vec::new(&env);
         let expiry = env.ledger().timestamp() + 10_000;
 
-        registry
-            .create_signal(
-                &provider,
-                &asset_pair,
-                &RegistrySignalAction::Buy,
-                &100,
-                &rationale,
-                &expiry,
-                &RegistrySignalCategory::SWING,
-                &tags,
-                &RegistryRiskLevel::Low,
-            )
-            .unwrap();
+        registry.create_signal(
+            &provider,
+            &asset_pair,
+            &RegistrySignalAction::Buy,
+            &100,
+            &rationale,
+            &expiry,
+            &RegistrySignalCategory::SWING,
+            &tags,
+            &RegistryRiskLevel::Low,
+        );
 
-        registry
-            .create_signal(
-                &provider,
-                &asset_pair,
-                &RegistrySignalAction::Sell,
-                &50,
-                &rationale,
-                &expiry,
-                &RegistrySignalCategory::SCALP,
-                &tags,
-                &RegistryRiskLevel::High,
-            )
-            .unwrap();
+        registry.create_signal(
+            &provider,
+            &asset_pair,
+            &RegistrySignalAction::Sell,
+            &50,
+            &rationale,
+            &expiry,
+            &RegistrySignalCategory::SCALP,
+            &tags,
+            &RegistryRiskLevel::High,
+        );
 
         let recommendations = client.get_recommended_signals(&user);
         assert_eq!(recommendations.len(), 2);
@@ -442,33 +438,29 @@ mod tests {
         let tags = Vec::new(&env);
         let expiry = env.ledger().timestamp() + 10_000;
 
-        let id1 = registry
-            .create_signal(
-                &provider,
-                &asset_pair,
-                &RegistrySignalAction::Buy,
-                &100,
-                &rationale,
-                &expiry,
-                &RegistrySignalCategory::SWING,
-                &tags,
-                &RegistryRiskLevel::Low,
-            )
-            .unwrap();
+        let id1 = registry.create_signal(
+            &provider,
+            &asset_pair,
+            &RegistrySignalAction::Buy,
+            &100,
+            &rationale,
+            &expiry,
+            &RegistrySignalCategory::SWING,
+            &tags,
+            &RegistryRiskLevel::Low,
+        );
 
-        registry
-            .create_signal(
-                &provider,
-                &asset_pair,
-                &RegistrySignalAction::Sell,
-                &50,
-                &rationale,
-                &expiry,
-                &RegistrySignalCategory::SCALP,
-                &tags,
-                &RegistryRiskLevel::High,
-            )
-            .unwrap();
+        registry.create_signal(
+            &provider,
+            &asset_pair,
+            &RegistrySignalAction::Sell,
+            &50,
+            &rationale,
+            &expiry,
+            &RegistrySignalCategory::SCALP,
+            &tags,
+            &RegistryRiskLevel::High,
+        );
 
         let mut preferred = Vec::new(&env);
         preferred.push_back(SignalCategory::SWING);

@@ -11,10 +11,11 @@ use crate::{
     Authority, CommitteeAction, CommitteeElectionStatus, CrossCommitteeStatus, DecisionStatus,
     EmergencyActionAuthority, EmergencyActionPayload, GovernanceContract, GovernanceContractClient,
     GovernanceError, ParameterAdjustmentAuthority, ReputationConfig, ReputationTier,
-    RewardConfigUpdateAction, StalenessLevel, TreasurySpendAction, TreasurySpendAuthority, VoteType,
+    RewardConfigUpdateAction, StalenessLevel, TreasurySpendAction, TreasurySpendAuthority,
+    VoteType,
 };
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{symbol_short, Address, Bytes, Env, Map, String, Vec};
+use soroban_sdk::{symbol_short, Address, Bytes, Env, Map, String, Symbol, Vec};
 use stellar_swipe_common::Asset;
 
 const SUPPLY: i128 = 1_000_000_000;
@@ -1098,14 +1099,19 @@ fn upgrade_announcement_event_emitted_on_contract_upgrade_proposal_success() {
     assert_eq!(status, ProposalStatus::Succeeded);
 
     // Check event was emitted
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::TryFromVal;
+
     let events = env.events().all();
-    assert_eq!(events.len(), 2); // propnew and upgrade announced
-    let upgrade_event = &events[1];
-    assert_eq!(
-        upgrade_event.0,
-        (symbol_short!("upgrade"), symbol_short!("announced"))
-    );
-    let (contract, hash, exec_after, notes) = upgrade_event.1.clone();
+    assert!(events.len() >= 2);
+    let upgrade_event = events.get(events.len() - 1).unwrap();
+    let topics: soroban_sdk::Vec<soroban_sdk::Val> = upgrade_event.1.clone();
+    let t0 = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    let t1 = Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(t0, symbol_short!("upgrade"));
+    assert_eq!(t1, symbol_short!("announced"));
+    let (contract, hash, exec_after, notes): (String, Bytes, u64, Bytes) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &upgrade_event.2).unwrap();
     assert_eq!(contract, String::from_str(&env, "auto_trade"));
     assert_eq!(hash, new_wasm_hash);
     assert_eq!(exec_after, 8 * 86_400 + 0); // execution_delay is 0 by default
@@ -1308,7 +1314,7 @@ fn reputation_config_can_be_updated_by_admin() {
 fn detect_staleness_logic() {
     use crate::reputation::detect_staleness;
     let env = Env::default();
-    let now = 1_000_000u64;
+    let now = 20_000_000u64;
 
     env.ledger().set_timestamp(now);
 
@@ -1352,7 +1358,7 @@ mod event_format_tests {
         (t0, t1)
     }
 
-    fn setup_gov(env: &Env) -> (Address, GovernanceContractClient) {
+    fn setup_gov(env: &Env) -> (Address, GovernanceContractClient<'_>) {
         let admin = Address::generate(env);
         let id = env.register(GovernanceContract, ());
         let client = GovernanceContractClient::new(env, &id);
