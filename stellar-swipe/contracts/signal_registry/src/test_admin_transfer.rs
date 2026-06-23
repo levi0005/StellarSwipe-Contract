@@ -70,7 +70,10 @@ fn test_accept_admin_transfer_wrong_address() {
 
     // Try to accept with wrong address - should fail
     let result = client.try_accept_admin_transfer(&wrong_address);
-    assert!(result.is_err(), "Wrong address should not be able to accept");
+    assert!(
+        result.is_err(),
+        "Wrong address should not be able to accept"
+    );
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn test_accept_admin_transfer_no_pending() {
 
     // Try to accept without any pending transfer - should fail
     let result = client.try_accept_admin_transfer(&random_address);
-    assert!(result.is_err(), "Should fail when no pending transfer exists");
+    assert!(
+        result.is_err(),
+        "Should fail when no pending transfer exists"
+    );
 }
 
 #[test]
@@ -114,7 +120,10 @@ fn test_transfer_expiry() {
 
     // Try to accept after expiry - should fail
     let result = client.try_accept_admin_transfer(&new_admin);
-    assert!(result.is_err(), "Acceptance should fail after 48 hour expiry");
+    assert!(
+        result.is_err(),
+        "Acceptance should fail after 48 hour expiry"
+    );
 }
 
 #[test]
@@ -142,7 +151,10 @@ fn test_transfer_expiry_boundary() {
 
     // Try to accept exactly at expiry boundary - should fail
     let result = client.try_accept_admin_transfer(&new_admin);
-    assert!(result.is_err(), "Acceptance should fail at exact expiry time");
+    assert!(
+        result.is_err(),
+        "Acceptance should fail at exact expiry time"
+    );
 
     // Go back and try just before expiry
     let contract_id2 = env.register_contract(None, SignalRegistry);
@@ -180,7 +192,10 @@ fn test_cancel_admin_transfer() {
 
     // Try to accept - should fail (no pending transfer anymore)
     let result = client.try_accept_admin_transfer(&new_admin);
-    assert!(result.is_err(), "Should not be able to accept after cancellation");
+    assert!(
+        result.is_err(),
+        "Should not be able to accept after cancellation"
+    );
 }
 
 #[test]
@@ -219,7 +234,10 @@ fn test_cancel_admin_transfer_no_pending() {
 
     // Try to cancel when no transfer pending - should fail
     let result = client.try_cancel_admin_transfer(&admin);
-    assert!(result.is_err(), "Should fail when no pending transfer exists");
+    assert!(
+        result.is_err(),
+        "Should fail when no pending transfer exists"
+    );
 }
 
 #[test]
@@ -244,7 +262,10 @@ fn test_multiple_transfer_proposals() {
 
     // new_admin_1 tries to accept - should fail (no longer pending)
     let result = client.try_accept_admin_transfer(&new_admin_1);
-    assert!(result.is_err(), "First address should not be able to accept after new proposal");
+    assert!(
+        result.is_err(),
+        "First address should not be able to accept after new proposal"
+    );
 
     // new_admin_2 should be able to accept
     client.accept_admin_transfer(&new_admin_2);
@@ -295,7 +316,10 @@ fn test_old_admin_cannot_transfer_after_transfer() {
 
     // admin1 tries to execute admin function - should fail
     let result = client.try_set_trade_fee(&admin1, &35);
-    assert!(result.is_err(), "Old admin should not be able to act after transfer");
+    assert!(
+        result.is_err(),
+        "Old admin should not be able to act after transfer"
+    );
 }
 
 #[test]

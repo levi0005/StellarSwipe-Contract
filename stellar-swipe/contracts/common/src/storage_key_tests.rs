@@ -83,15 +83,51 @@ mod tests {
         let user_a = Address::generate(&env);
         let user_b = Address::generate(&env);
 
-        assert_keys_distinct(&env, &SingleAddrKey::UserPositions(user_a.clone()), &SingleAddrKey::UserPositions(user_b.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::UserBadges(user_a.clone()), &SingleAddrKey::UserBadges(user_b.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::Authorization(user_a.clone()), &SingleAddrKey::Authorization(user_b.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::PositionLimitExempt(user_a.clone()), &SingleAddrKey::PositionLimitExempt(user_b.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::LastInsufficientBalance(user_a.clone()), &SingleAddrKey::LastInsufficientBalance(user_b.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::ProviderReputationScore(user_a.clone()), &SingleAddrKey::ProviderReputationScore(user_b.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::TreasuryBalance(user_a.clone()), &SingleAddrKey::TreasuryBalance(user_b.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::MonthlyTradeVolume(user_a.clone()), &SingleAddrKey::MonthlyTradeVolume(user_b.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::ProviderTerms(user_a.clone()), &SingleAddrKey::ProviderTerms(user_b.clone()));
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::UserPositions(user_a.clone()),
+            &SingleAddrKey::UserPositions(user_b.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::UserBadges(user_a.clone()),
+            &SingleAddrKey::UserBadges(user_b.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::Authorization(user_a.clone()),
+            &SingleAddrKey::Authorization(user_b.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::PositionLimitExempt(user_a.clone()),
+            &SingleAddrKey::PositionLimitExempt(user_b.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::LastInsufficientBalance(user_a.clone()),
+            &SingleAddrKey::LastInsufficientBalance(user_b.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::ProviderReputationScore(user_a.clone()),
+            &SingleAddrKey::ProviderReputationScore(user_b.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::TreasuryBalance(user_a.clone()),
+            &SingleAddrKey::TreasuryBalance(user_b.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::MonthlyTradeVolume(user_a.clone()),
+            &SingleAddrKey::MonthlyTradeVolume(user_b.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::ProviderTerms(user_a.clone()),
+            &SingleAddrKey::ProviderTerms(user_b.clone()),
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -143,9 +179,21 @@ mod tests {
         let env = Env::default();
         let addr = Address::generate(&env);
 
-        assert_keys_distinct(&env, &SingleAddrKey::UserPositions(addr.clone()), &SingleAddrKey::UserBadges(addr.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::TreasuryBalance(addr.clone()), &SingleAddrKey::MonthlyTradeVolume(addr.clone()));
-        assert_keys_distinct(&env, &SingleAddrKey::PositionLimitExempt(addr.clone()), &SingleAddrKey::LastInsufficientBalance(addr.clone()));
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::UserPositions(addr.clone()),
+            &SingleAddrKey::UserBadges(addr.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::TreasuryBalance(addr.clone()),
+            &SingleAddrKey::MonthlyTradeVolume(addr.clone()),
+        );
+        assert_keys_distinct(
+            &env,
+            &SingleAddrKey::PositionLimitExempt(addr.clone()),
+            &SingleAddrKey::LastInsufficientBalance(addr.clone()),
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -156,22 +204,46 @@ mod tests {
     fn stake_vault_migration_keys_are_distinct() {
         let env = Env::default();
 
-        env.storage().persistent().set(&StakeVaultMigrationKey::StakesV1, &1u32);
-        assert!(!env.storage().persistent().has(&StakeVaultMigrationKey::StakesV2));
-        assert!(!env.storage().persistent().has(&StakeVaultMigrationKey::MigrationState));
-        env.storage().persistent().remove(&StakeVaultMigrationKey::StakesV1);
+        env.storage()
+            .persistent()
+            .set(&StakeVaultMigrationKey::StakesV1, &1u32);
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&StakeVaultMigrationKey::StakesV2));
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&StakeVaultMigrationKey::MigrationState));
+        env.storage()
+            .persistent()
+            .remove(&StakeVaultMigrationKey::StakesV1);
 
-        env.storage().persistent().set(&StakeVaultMigrationKey::StakesV2, &1u32);
-        assert!(!env.storage().persistent().has(&StakeVaultMigrationKey::MigrationState));
-        env.storage().persistent().remove(&StakeVaultMigrationKey::StakesV2);
+        env.storage()
+            .persistent()
+            .set(&StakeVaultMigrationKey::StakesV2, &1u32);
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&StakeVaultMigrationKey::MigrationState));
+        env.storage()
+            .persistent()
+            .remove(&StakeVaultMigrationKey::StakesV2);
     }
 
     #[test]
     fn stake_vault_storage_keys_are_distinct() {
         let env = Env::default();
 
-        env.storage().instance().set(&StakeVaultStorageKey::Admin, &1u32);
-        assert!(!env.storage().instance().has(&StakeVaultStorageKey::StakeToken));
-        env.storage().instance().remove(&StakeVaultStorageKey::Admin);
+        env.storage()
+            .instance()
+            .set(&StakeVaultStorageKey::Admin, &1u32);
+        assert!(!env
+            .storage()
+            .instance()
+            .has(&StakeVaultStorageKey::StakeToken));
+        env.storage()
+            .instance()
+            .remove(&StakeVaultStorageKey::Admin);
     }
 }

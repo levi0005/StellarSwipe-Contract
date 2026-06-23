@@ -62,7 +62,8 @@ pub enum SignalAction {
 }
 
 #[contracttype]
-#[derive(Clone, Debug)]pub enum SignalStatus {
+#[derive(Clone, Debug)]
+pub enum SignalStatus {
     Pending,
     Active,
     Executed,
@@ -73,7 +74,8 @@ pub enum SignalAction {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]pub struct TradingStyle {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TradingStyle {
     pub preferred_categories: Vec<SignalCategory>,
     pub risk_tolerance: RiskRating,
     pub max_hold_duration: HoldDuration,
@@ -164,7 +166,9 @@ pub fn set_trading_style(env: &Env, user: &Address, style: TradingStyle) {
 
 /// Retrieve trading style profile for `user`.
 pub fn get_trading_style(env: &Env, user: &Address) -> Option<TradingStyle> {
-    env.storage().persistent().get(&DataKey::TradingStyle(user.clone()))
+    env.storage()
+        .persistent()
+        .get(&DataKey::TradingStyle(user.clone()))
 }
 
 fn is_risk_allowed(signal_risk: &RiskLevel, tolerance: &RiskRating) -> bool {
@@ -176,8 +180,16 @@ fn is_risk_allowed(signal_risk: &RiskLevel, tolerance: &RiskRating) -> bool {
 fn category_matches_duration(category: &SignalCategory, max_hold_duration: &HoldDuration) -> bool {
     match max_hold_duration {
         HoldDuration::Any => true,
-        HoldDuration::Short => matches!(category, SignalCategory::SCALP | SignalCategory::ARBITRAGE),
-        HoldDuration::Medium => matches!(category, SignalCategory::SCALP | SignalCategory::SWING | SignalCategory::ARBITRAGE | SignalCategory::PREMIUM),
+        HoldDuration::Short => {
+            matches!(category, SignalCategory::SCALP | SignalCategory::ARBITRAGE)
+        }
+        HoldDuration::Medium => matches!(
+            category,
+            SignalCategory::SCALP
+                | SignalCategory::SWING
+                | SignalCategory::ARBITRAGE
+                | SignalCategory::PREMIUM
+        ),
         HoldDuration::Long => true,
     }
 }
@@ -254,11 +266,8 @@ mod tests {
     use super::*;
     use crate::{UserPortfolio, UserPortfolioClient};
     use signal_registry::{
-        SignalAction as RegistrySignalAction,
-        SignalCategory as RegistrySignalCategory,
-        SignalRegistry,
-        SignalRegistryClient,
-        RiskLevel as RegistryRiskLevel,
+        RiskLevel as RegistryRiskLevel, SignalAction as RegistrySignalAction,
+        SignalCategory as RegistrySignalCategory, SignalRegistry, SignalRegistryClient,
     };
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Address, Env, String, Vec};
@@ -275,8 +284,7 @@ mod tests {
         (env, contract_id, client)
     }
 
-    fn setup_with_registry(
-    ) -> (
+    fn setup_with_registry() -> (
         Env,
         Address,
         UserPortfolioClient<'static>,
@@ -376,7 +384,9 @@ mod tests {
         };
 
         client.set_trading_style(&user, &style);
-        let stored = client.get_trading_style(&user).expect("style should be stored");
+        let stored = client
+            .get_trading_style(&user)
+            .expect("style should be stored");
         assert_eq!(stored, style);
     }
 

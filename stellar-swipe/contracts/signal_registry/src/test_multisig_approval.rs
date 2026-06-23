@@ -3,14 +3,12 @@
 use super::*;
 use crate::errors::AdminError;
 use crate::CriticalActionPayload;
-use soroban_sdk::{
-    testutils::Address as _,
-    testutils::Ledger,
-    vec, Env, String,
-};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger, vec, Env, String};
 use stellar_swipe_common::{MultisigTimelockConfig, ProposalStatus, DEFAULT_FEE_CHANGE_DELAY};
 
-fn setup_multisig_client(env: &Env) -> (SignalRegistryClient<'_>, Address, Address, Address, Address) {
+fn setup_multisig_client(
+    env: &Env,
+) -> (SignalRegistryClient<'_>, Address, Address, Address, Address) {
     #[allow(deprecated)]
     let contract_id = env.register_contract(None, SignalRegistry);
     let client = SignalRegistryClient::new(env, &contract_id);
@@ -93,7 +91,8 @@ fn test_timelock_blocks_early_execution() {
     assert_eq!(result, Err(Ok(AdminError::TimelockNotElapsed)));
 
     let now = env.ledger().timestamp();
-    env.ledger().set_timestamp(now + DEFAULT_FEE_CHANGE_DELAY + 1);
+    env.ledger()
+        .set_timestamp(now + DEFAULT_FEE_CHANGE_DELAY + 1);
 
     client.execute_proposal(&signer1, &proposal_id);
     assert_eq!(client.get_config().trade_fee_bps, 15);

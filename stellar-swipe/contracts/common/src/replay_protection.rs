@@ -80,11 +80,7 @@ pub fn verify_and_commit(
 
     // 3. Duplicate hash check (only within TTL window)
     let hash_key = ReplayKey::TxHash(tx_hash.clone());
-    if let Some(executed_at) = env
-        .storage()
-        .persistent()
-        .get::<_, u64>(&hash_key)
-    {
+    if let Some(executed_at) = env.storage().persistent().get::<_, u64>(&hash_key) {
         if now.saturating_sub(executed_at) < TX_HASH_TTL_SECS {
             emit_replay(env, user, &tx_hash, symbol_short!("dup_tx"));
             return Err(ReplayError::DuplicateTx);
@@ -96,9 +92,7 @@ pub fn verify_and_commit(
     env.storage()
         .persistent()
         .set(&ReplayKey::UserNonce(user.clone()), &nonce);
-    env.storage()
-        .persistent()
-        .set(&hash_key, &now);
+    env.storage().persistent().set(&hash_key, &now);
 
     Ok(())
 }
@@ -116,7 +110,10 @@ fn emit_replay(env: &Env, user: &Address, tx_hash: &Bytes, reason: soroban_sdk::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger}, Bytes, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Bytes, Env,
+    };
 
     fn env_user() -> (Env, Address) {
         let env = Env::default();
@@ -196,7 +193,8 @@ mod tests {
         verify_and_commit(&env, &user, 1, h.clone(), far_future(&env)).unwrap();
 
         // Advance past 1-hour TTL
-        env.ledger().set_timestamp(env.ledger().timestamp() + TX_HASH_TTL_SECS + 1);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + TX_HASH_TTL_SECS + 1);
 
         // Same hash is now allowed (TTL expired); nonce must be 2
         assert_eq!(

@@ -106,11 +106,7 @@ pub fn require_operator(env: &Env, caller: &Address) -> Result<(), AutoTradeErro
     Ok(())
 }
 
-pub fn set_rate_limited(
-    env: &Env,
-    caller: &Address,
-    user: &Address,
-) -> Result<(), AutoTradeError> {
+pub fn set_rate_limited(env: &Env, caller: &Address, user: &Address) -> Result<(), AutoTradeError> {
     require_operator(env, caller)?;
     let now = env.ledger().timestamp();
     let expires_at = now + RATE_LIMIT_DURATION_SECONDS;
@@ -337,10 +333,8 @@ pub fn update_cb_stats(env: &Env, failed: bool, volume: i128, price: i128) {
             env.storage()
                 .instance()
                 .set(&AdminStorageKey::PauseStates, &states);
-            env.events().publish(
-                (Symbol::new(env, "circuit_breaker_triggered"),),
-                reason,
-            );
+            env.events()
+                .publish((Symbol::new(env, "circuit_breaker_triggered"),), reason);
         }
     }
 }
@@ -393,7 +387,9 @@ pub fn accept_admin_transfer(env: &Env, caller: &Address) -> Result<(), AutoTrad
 
     let now = env.ledger().timestamp();
     if now >= expires_at {
-        env.storage().instance().remove(&AdminStorageKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&AdminStorageKey::PendingAdmin);
         env.storage()
             .instance()
             .remove(&AdminStorageKey::PendingAdminExpiry);
@@ -404,7 +400,9 @@ pub fn accept_admin_transfer(env: &Env, caller: &Address) -> Result<(), AutoTrad
     env.storage()
         .instance()
         .set(&AdminStorageKey::Admin, &pending_admin);
-    env.storage().instance().remove(&AdminStorageKey::PendingAdmin);
+    env.storage()
+        .instance()
+        .remove(&AdminStorageKey::PendingAdmin);
     env.storage()
         .instance()
         .remove(&AdminStorageKey::PendingAdminExpiry);
@@ -428,7 +426,9 @@ pub fn cancel_admin_transfer(env: &Env, caller: &Address) -> Result<(), AutoTrad
         .instance()
         .get(&AdminStorageKey::PendingAdmin)
         .ok_or(AutoTradeError::PendingAdminNotFound)?;
-    env.storage().instance().remove(&AdminStorageKey::PendingAdmin);
+    env.storage()
+        .instance()
+        .remove(&AdminStorageKey::PendingAdmin);
     env.storage()
         .instance()
         .remove(&AdminStorageKey::PendingAdminExpiry);
@@ -449,10 +449,7 @@ pub fn require_self_destruct_allowed(env: &Env) -> Result<(), AutoTradeError> {
     Ok(())
 }
 
-pub fn disable_self_destruct_protection(
-    env: &Env,
-    caller: &Address,
-) -> Result<(), AutoTradeError> {
+pub fn disable_self_destruct_protection(env: &Env, caller: &Address) -> Result<(), AutoTradeError> {
     require_admin(env, caller)?;
     caller.require_auth();
     env.storage()

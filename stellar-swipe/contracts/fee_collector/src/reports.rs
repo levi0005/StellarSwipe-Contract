@@ -6,9 +6,7 @@
 //! expected to be merged by an off-chain aggregator (or a future cross-contract
 //! implementation).
 
-use crate::storage::{
-    get_provider_daily_fee_shares, get_provider_earnings_first_day,
-};
+use crate::storage::{get_provider_daily_fee_shares, get_provider_earnings_first_day};
 use soroban_sdk::{contracttype, Address, Env};
 use stellar_swipe_common::SECONDS_PER_DAY;
 
@@ -118,8 +116,8 @@ pub fn get_provider_earnings_leaderboard(env: &Env, limit: u32) -> Vec<EarningsL
             if amount <= 0 {
                 continue;
             }
-            let first_day = crate::storage::get_provider_earnings_first_day(env, provider_addr)
-                .unwrap_or(0);
+            let first_day =
+                crate::storage::get_provider_earnings_first_day(env, provider_addr).unwrap_or(0);
             entries.push_back(EarningsLeaderboardEntry {
                 rank: 0,
                 provider: provider_addr.clone(),

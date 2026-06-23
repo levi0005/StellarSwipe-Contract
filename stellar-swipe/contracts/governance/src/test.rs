@@ -4,13 +4,15 @@ use crate::distribution::{
     DistributionRecipients, EARLY_INVESTOR_VESTING_DURATION, TEAM_CLIFF_DURATION,
     TEAM_VESTING_DURATION, YEAR_SECONDS,
 };
+use crate::proposals::{
+    GovernanceConfig, ProposalStatus, ProposalType, VoteType as GovernanceVoteType,
+};
 use crate::{
     Authority, CommitteeAction, CommitteeElectionStatus, CrossCommitteeStatus, DecisionStatus,
     EmergencyActionAuthority, EmergencyActionPayload, GovernanceContract, GovernanceContractClient,
     GovernanceError, ParameterAdjustmentAuthority, RewardConfigUpdateAction, TreasurySpendAction,
     TreasurySpendAuthority, VoteType,
 };
-use crate::proposals::{GovernanceConfig, ProposalStatus, ProposalType, VoteType as GovernanceVoteType};
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Address, Bytes, Env, Map, String, Vec};
 use stellar_swipe_common::Asset;
@@ -351,12 +353,7 @@ fn recurring_payments_reporting_and_rebalance_are_tracked() {
         &true,
     );
     // governance must approve before recurring payments can be scheduled or executed
-    client.approve_treasury_budget(
-        &admin,
-        &String::from_str(&env, "grants"),
-        &1u64,
-        &500i128,
-    );
+    client.approve_treasury_budget(&admin, &String::from_str(&env, "grants"), &1u64, &500i128);
     client.create_recurring_payment(
         &admin,
         &Address::generate(&env),
@@ -781,11 +778,7 @@ fn governance_proposal_vote_finalize_and_execute() {
 
     let proposal_id = client.create_proposal(
         &recipients.community_rewards,
-        &ProposalType::ParameterChange(
-            String::from_str(&env, "liquidity_reward_bps"),
-            100,
-            120,
-        ),
+        &ProposalType::ParameterChange(String::from_str(&env, "liquidity_reward_bps"), 100, 120),
         &String::from_str(&env, "Adjust reward"),
         &String::from_str(&env, "Increase by 20%"),
         &Bytes::new(&env),
@@ -797,7 +790,11 @@ fn governance_proposal_vote_finalize_and_execute() {
         &recipients.community_rewards,
         &GovernanceVoteType::For,
     );
-    client.cast_vote(&proposal_id, &recipients.public_sale, &GovernanceVoteType::For);
+    client.cast_vote(
+        &proposal_id,
+        &recipients.public_sale,
+        &GovernanceVoteType::For,
+    );
 
     env.ledger().set_timestamp(8 * 86_400);
     let status = client.finalize_proposal(&proposal_id);
@@ -841,10 +838,17 @@ fn timelock_queue_execute_and_cancel_flow() {
         &recipients.community_rewards,
         &GovernanceVoteType::For,
     );
-    client.cast_vote(&proposal_id, &recipients.public_sale, &GovernanceVoteType::For);
+    client.cast_vote(
+        &proposal_id,
+        &recipients.public_sale,
+        &GovernanceVoteType::For,
+    );
 
     env.ledger().set_timestamp(8 * 86_400);
-    assert_eq!(client.finalize_proposal(&proposal_id), ProposalStatus::Succeeded);
+    assert_eq!(
+        client.finalize_proposal(&proposal_id),
+        ProposalStatus::Succeeded
+    );
 
     let action_id = client.queue_action(&proposal_id);
     let early = client.try_execute_queued_action(&action_id, &admin);
@@ -902,10 +906,17 @@ fn queue_underfunded_treasury_spend_action(
         &recipients.community_rewards,
         &GovernanceVoteType::For,
     );
-    client.cast_vote(&proposal_id, &recipients.public_sale, &GovernanceVoteType::For);
+    client.cast_vote(
+        &proposal_id,
+        &recipients.public_sale,
+        &GovernanceVoteType::For,
+    );
 
     env.ledger().set_timestamp(8 * 86_400);
-    assert_eq!(client.finalize_proposal(&proposal_id), ProposalStatus::Succeeded);
+    assert_eq!(
+        client.finalize_proposal(&proposal_id),
+        ProposalStatus::Succeeded
+    );
 
     let action_id = client.queue_action(&proposal_id);
     client.set_treasury_asset(admin, &spend_asset, &0i128);
@@ -957,7 +968,10 @@ fn emergency_unblock_retries_a_stuck_action_and_rejects_duplicate_execution() {
     // same way the normal path did.
     env.ledger().set_timestamp(11 * 86_400);
     let retry_still_stuck = client.try_emergency_unblock_action(&action_id, &admin);
-    assert_eq!(retry_still_stuck, Err(Ok(GovernanceError::InsufficientBalance)));
+    assert_eq!(
+        retry_still_stuck,
+        Err(Ok(GovernanceError::InsufficientBalance))
+    );
     assert!(!client.queued_action(&action_id).executed);
 
     // Once the underlying contract state issue is resolved, the guardian's
@@ -1000,7 +1014,11 @@ fn governance_reputation_tracks_activity() {
         &recipients.community_rewards,
         &GovernanceVoteType::For,
     );
-    client.cast_vote(&proposal_id, &recipients.public_sale, &GovernanceVoteType::For);
+    client.cast_vote(
+        &proposal_id,
+        &recipients.public_sale,
+        &GovernanceVoteType::For,
+    );
 
     env.ledger().set_timestamp(8 * 86_400);
     client.finalize_proposal(&proposal_id);
@@ -1057,10 +1075,7 @@ fn upgrade_announcement_event_emitted_on_contract_upgrade_proposal_success() {
     let migration_notes_hash = Bytes::from_array(&env, &[2u8; 32]);
     let proposal_id = client.create_proposal(
         &recipients.community_rewards,
-        &ProposalType::ContractUpgrade(
-            String::from_str(&env, "auto_trade"),
-            new_wasm_hash.clone(),
-        ),
+        &ProposalType::ContractUpgrade(String::from_str(&env, "auto_trade"), new_wasm_hash.clone()),
         &String::from_str(&env, "Upgrade auto_trade contract"),
         &String::from_str(&env, "Deploy new version"),
         &migration_notes_hash,
@@ -1072,7 +1087,11 @@ fn upgrade_announcement_event_emitted_on_contract_upgrade_proposal_success() {
         &recipients.community_rewards,
         &GovernanceVoteType::For,
     );
-    client.cast_vote(&proposal_id, &recipients.public_sale, &GovernanceVoteType::For);
+    client.cast_vote(
+        &proposal_id,
+        &recipients.public_sale,
+        &GovernanceVoteType::For,
+    );
 
     env.ledger().set_timestamp(8 * 86_400);
     let status = client.finalize_proposal(&proposal_id);
@@ -1082,7 +1101,10 @@ fn upgrade_announcement_event_emitted_on_contract_upgrade_proposal_success() {
     let events = env.events().all();
     assert_eq!(events.len(), 2); // propnew and upgrade announced
     let upgrade_event = &events[1];
-    assert_eq!(upgrade_event.0, (symbol_short!("upgrade"), symbol_short!("announced")));
+    assert_eq!(
+        upgrade_event.0,
+        (symbol_short!("upgrade"), symbol_short!("announced"))
+    );
     let (contract, hash, exec_after, notes) = upgrade_event.1.clone();
     assert_eq!(contract, String::from_str(&env, "auto_trade"));
     assert_eq!(hash, new_wasm_hash);
@@ -1109,9 +1131,7 @@ fn reputation_tier_computed_correctly_from_participation() {
         env.ledger().set_timestamp(100 + i * 1000);
         let _pid = client.create_proposal(
             &user,
-            &ProposalType::ParameterChange(
-                String::from_str(&env, "test_param"), 1000, 1100,
-            ),
+            &ProposalType::ParameterChange(String::from_str(&env, "test_param"), 1000, 1100),
             &String::from_str(&env, &format!("Proposal {}", i)),
             &String::from_str(&env, "desc"),
             &Bytes::new(&env),
@@ -1136,9 +1156,7 @@ fn decay_applied_after_grace_period() {
     env.ledger().set_timestamp(100);
     let pid = client.create_proposal(
         &user,
-        &ProposalType::ParameterChange(
-            String::from_str(&env, "test_param"), 1000, 1100,
-        ),
+        &ProposalType::ParameterChange(String::from_str(&env, "test_param"), 1000, 1100),
         &String::from_str(&env, "Test"),
         &String::from_str(&env, "desc"),
         &Bytes::new(&env),
@@ -1154,7 +1172,8 @@ fn decay_applied_after_grace_period() {
     assert!(
         rep_after.reputation_score < rep_before.reputation_score,
         "Reputation should decay after grace period: before={}, after={}",
-        rep_before.reputation_score, rep_after.reputation_score,
+        rep_before.reputation_score,
+        rep_after.reputation_score,
     );
 }
 
@@ -1171,9 +1190,7 @@ fn no_decay_within_grace_period() {
     env.ledger().set_timestamp(100);
     let _pid = client.create_proposal(
         &user,
-        &ProposalType::ParameterChange(
-            String::from_str(&env, "test_param"), 1000, 1100,
-        ),
+        &ProposalType::ParameterChange(String::from_str(&env, "test_param"), 1000, 1100),
         &String::from_str(&env, "Test"),
         &String::from_str(&env, "desc"),
         &Bytes::new(&env),
@@ -1205,9 +1222,7 @@ fn staleness_level_detected_correctly() {
     env.ledger().set_timestamp(1000);
     let _ = client.create_proposal(
         &user,
-        &ProposalType::ParameterChange(
-            String::from_str(&env, "test_param"), 1000, 1100,
-        ),
+        &ProposalType::ParameterChange(String::from_str(&env, "test_param"), 1000, 1100),
         &String::from_str(&env, "Test"),
         &String::from_str(&env, "desc"),
         &Bytes::new(&env),
@@ -1246,9 +1261,7 @@ fn refresh_stale_reputation_recalculates_score() {
     env.ledger().set_timestamp(100);
     let _pid = client.create_proposal(
         &user,
-        &ProposalType::ParameterChange(
-            String::from_str(&env, "test_param"), 1000, 1100,
-        ),
+        &ProposalType::ParameterChange(String::from_str(&env, "test_param"), 1000, 1100),
         &String::from_str(&env, "Test"),
         &String::from_str(&env, "desc"),
         &Bytes::new(&env),
@@ -1300,16 +1313,28 @@ fn detect_staleness_logic() {
     env.ledger().set_timestamp(now);
 
     // Active: last activity was 10 days ago
-    assert_eq!(detect_staleness(&env, now - 10 * 86_400), StalenessLevel::Active);
+    assert_eq!(
+        detect_staleness(&env, now - 10 * 86_400),
+        StalenessLevel::Active
+    );
 
     // Aging: last activity was 60 days ago
-    assert_eq!(detect_staleness(&env, now - 60 * 86_400), StalenessLevel::Aging);
+    assert_eq!(
+        detect_staleness(&env, now - 60 * 86_400),
+        StalenessLevel::Aging
+    );
 
     // Stale: last activity was 120 days ago
-    assert_eq!(detect_staleness(&env, now - 120 * 86_400), StalenessLevel::Stale);
+    assert_eq!(
+        detect_staleness(&env, now - 120 * 86_400),
+        StalenessLevel::Stale
+    );
 
     // Critical: last activity was 200 days ago
-    assert_eq!(detect_staleness(&env, now - 200 * 86_400), StalenessLevel::Critical);
+    assert_eq!(
+        detect_staleness(&env, now - 200 * 86_400),
+        StalenessLevel::Critical
+    );
 }
 
 #[cfg(test)]
@@ -1357,12 +1382,9 @@ mod event_format_tests {
         // Give user a balance first via distribution mock — use admin accrual
         // then stake
         let _ = client.try_stake(&user, &1i128); // may fail if no balance; just check event shape if it fires
-        // Use accrue to give balance then stake
-        let _ = client.try_accrue_liquidity_rewards(
-            &Address::generate(&env),
-            &user,
-            &1_000_000i128,
-        );
+                                                 // Use accrue to give balance then stake
+        let _ =
+            client.try_accrue_liquidity_rewards(&Address::generate(&env), &user, &1_000_000i128);
         let _ = client.try_stake(&user, &100i128);
         // Find stake_changed event
         let found = env.events().all().iter().any(|e| {
@@ -1372,7 +1394,10 @@ mod event_format_tests {
             t0 == Some(Symbol::new(&env, "governance"))
                 && t1 == Some(Symbol::new(&env, "stake_changed"))
         });
-        assert!(found, "stake_changed must use (governance, stake_changed) topics");
+        assert!(
+            found,
+            "stake_changed must use (governance, stake_changed) topics"
+        );
     }
 
     #[test]
@@ -1382,14 +1407,7 @@ mod event_format_tests {
         let (admin, client) = setup_gov(&env);
         let beneficiary = Address::generate(&env);
         env.ledger().with_mut(|l| l.timestamp = 0);
-        client.create_vesting_schedule(
-            &admin,
-            &beneficiary,
-            &1_000i128,
-            &0u64,
-            &0u64,
-            &1u64,
-        );
+        client.create_vesting_schedule(&admin, &beneficiary, &1_000i128, &0u64, &0u64, &1u64);
         env.ledger().with_mut(|l| l.timestamp = 10);
         client.release_vested_tokens(&beneficiary);
         let (contract, event) = last_topics(&env);
@@ -1452,23 +1470,26 @@ fn election_fails_when_voter_participation_below_quorum() {
     client.nominate_for_committee(&committee.id, &candidate_three, &recipients.treasury);
 
     // Only 1 voter participates (below quorum of 3)
-    client.vote_in_committee_election(
-        &committee.id,
-        &recipients.community_rewards,
-        &candidate_one,
-    );
+    client.vote_in_committee_election(&committee.id, &recipients.community_rewards, &candidate_one);
 
     env.ledger().set_timestamp(8 * 86_400);
     let result = client.finalize_committee_election(&admin, &committee.id);
 
-    assert_eq!(result.status, CommitteeElectionStatus::FailedQuorumParticipation);
+    assert_eq!(
+        result.status,
+        CommitteeElectionStatus::FailedQuorumParticipation
+    );
     assert_eq!(result.winners.len(), 0);
     assert_eq!(result.valid_votes, 1);
     assert_eq!(result.rejected_votes, 0);
 
     // Committee membership must be unchanged
     let updated = client.committee(&committee.id);
-    assert_eq!(updated.members.len(), 5, "existing members must be preserved on quorum failure");
+    assert_eq!(
+        updated.members.len(),
+        5,
+        "existing members must be preserved on quorum failure"
+    );
 }
 
 #[test]
@@ -1501,11 +1522,7 @@ fn election_fails_when_stake_weight_below_quorum_threshold() {
     client.nominate_for_committee(&committee.id, &candidate_two, &recipients.public_sale);
     client.nominate_for_committee(&committee.id, &candidate_three, &recipients.treasury);
 
-    client.vote_in_committee_election(
-        &committee.id,
-        &recipients.community_rewards,
-        &candidate_one,
-    );
+    client.vote_in_committee_election(&committee.id, &recipients.community_rewards, &candidate_one);
     client.vote_in_committee_election(&committee.id, &recipients.public_sale, &candidate_two);
     client.vote_in_committee_election(&committee.id, &recipients.treasury, &candidate_three);
 
@@ -1519,7 +1536,11 @@ fn election_fails_when_stake_weight_below_quorum_threshold() {
 
     // Committee membership must be unchanged
     let updated = client.committee(&committee.id);
-    assert_eq!(updated.members.len(), 5, "existing members must be preserved on stake quorum failure");
+    assert_eq!(
+        updated.members.len(),
+        5,
+        "existing members must be preserved on stake quorum failure"
+    );
 }
 
 #[test]
@@ -1602,11 +1623,7 @@ fn duplicate_vote_is_rejected_without_corrupting_election_state() {
     client.nominate_for_committee(&committee.id, &candidate_one, &recipients.community_rewards);
 
     // First vote — should succeed
-    client.vote_in_committee_election(
-        &committee.id,
-        &recipients.community_rewards,
-        &candidate_one,
-    );
+    client.vote_in_committee_election(&committee.id, &recipients.community_rewards, &candidate_one);
 
     // Second vote from same voter — must be rejected
     let result = client.try_vote_in_committee_election(
@@ -1618,7 +1635,11 @@ fn duplicate_vote_is_rejected_without_corrupting_election_state() {
 
     // Exactly 1 vote must be recorded, not 2
     let election = client.committee_election(&committee.id);
-    assert_eq!(election.votes.len(), 1, "only one vote should be recorded per voter");
+    assert_eq!(
+        election.votes.len(),
+        1,
+        "only one vote should be recorded per voter"
+    );
 }
 
 #[test]
@@ -1644,11 +1665,7 @@ fn election_result_exposes_rejected_vote_count() {
     client.nominate_for_committee(&committee.id, &candidate_three, &recipients.treasury);
 
     // All three cast valid votes
-    client.vote_in_committee_election(
-        &committee.id,
-        &recipients.community_rewards,
-        &candidate_one,
-    );
+    client.vote_in_committee_election(&committee.id, &recipients.community_rewards, &candidate_one);
     client.vote_in_committee_election(&committee.id, &recipients.public_sale, &candidate_two);
     client.vote_in_committee_election(&committee.id, &recipients.treasury, &candidate_three);
 
@@ -1680,7 +1697,7 @@ fn successful_election_with_both_quorum_thresholds_met() {
         &committee.id,
         &3u32,
         &7u32,
-        &2u32,          // need at least 2 voters
+        &2u32,            // need at least 2 voters
         &100_000_000i128, // need at least 100_000_000 total stake weight
     );
 
@@ -1691,11 +1708,7 @@ fn successful_election_with_both_quorum_thresholds_met() {
     client.nominate_for_committee(&committee.id, &candidate_two, &recipients.public_sale);
     client.nominate_for_committee(&committee.id, &candidate_three, &recipients.treasury);
 
-    client.vote_in_committee_election(
-        &committee.id,
-        &recipients.community_rewards,
-        &candidate_one,
-    );
+    client.vote_in_committee_election(&committee.id, &recipients.community_rewards, &candidate_one);
     client.vote_in_committee_election(&committee.id, &recipients.public_sale, &candidate_one);
     client.vote_in_committee_election(&committee.id, &recipients.treasury, &candidate_two);
 
@@ -1737,15 +1750,14 @@ fn election_can_be_restarted_after_quorum_failure() {
     client.nominate_for_committee(&committee.id, &candidate_three, &recipients.treasury);
 
     // Only 1 vote cast — quorum requires 5
-    client.vote_in_committee_election(
-        &committee.id,
-        &recipients.community_rewards,
-        &candidate_one,
-    );
+    client.vote_in_committee_election(&committee.id, &recipients.community_rewards, &candidate_one);
 
     env.ledger().set_timestamp(8 * 86_400);
     let first_result = client.finalize_committee_election(&admin, &committee.id);
-    assert_eq!(first_result.status, CommitteeElectionStatus::FailedQuorumParticipation);
+    assert_eq!(
+        first_result.status,
+        CommitteeElectionStatus::FailedQuorumParticipation
+    );
 
     // After a failed election the record is cleared; a new election can be started
     // (advance time so the new election isn't blocked by a running election)
@@ -1824,12 +1836,7 @@ fn spend_exceeding_approved_cap_is_rejected() {
         &false,
     );
     // Governance approves only 200 out of 500 allocated
-    client.approve_treasury_budget(
-        &admin,
-        &String::from_str(&env, "ops"),
-        &10u64,
-        &200i128,
-    );
+    client.approve_treasury_budget(&admin, &String::from_str(&env, "ops"), &10u64, &200i128);
 
     // First draw of 150 succeeds (drawn: 150 ≤ cap 200)
     client.execute_treasury_spend(
@@ -1900,12 +1907,7 @@ fn re_approval_resets_drawn_and_allows_new_spending() {
         &100u64,
         &false,
     );
-    client.approve_treasury_budget(
-        &admin,
-        &String::from_str(&env, "ops"),
-        &20u64,
-        &300i128,
-    );
+    client.approve_treasury_budget(&admin, &String::from_str(&env, "ops"), &20u64, &300i128);
 
     // Draw down to the cap
     client.execute_treasury_spend(
@@ -1931,12 +1933,7 @@ fn re_approval_resets_drawn_and_allows_new_spending() {
     assert_eq!(rejected, Err(Ok(GovernanceError::ApprovedCapExceeded)));
 
     // New governance proposal approves another 150
-    client.approve_treasury_budget(
-        &admin,
-        &String::from_str(&env, "ops"),
-        &21u64,
-        &150i128,
-    );
+    client.approve_treasury_budget(&admin, &String::from_str(&env, "ops"), &21u64, &150i128);
 
     // Spending is now allowed again
     let spend = client.execute_treasury_spend(
@@ -1994,12 +1991,7 @@ fn recurring_payment_paused_when_approved_cap_exhausted() {
         &100u64,
         &true,
     );
-    client.approve_treasury_budget(
-        &admin,
-        &String::from_str(&env, "grants"),
-        &30u64,
-        &150i128,
-    );
+    client.approve_treasury_budget(&admin, &String::from_str(&env, "grants"), &30u64, &150i128);
     client.create_recurring_payment(
         &admin,
         &Address::generate(&env),
@@ -2055,271 +2047,268 @@ fn non_admin_cannot_approve_budget() {
 
 #[test]
 fn conviction_calibration_default_is_noop() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
-        let config = client.conviction_calibration();
-        assert_eq!(config.penalty_threshold_days, 0);
-        assert_eq!(config.penalty_multiplier, 1);
-        assert_eq!(config.reward_bonus_pct, 0);
-        assert_eq!(config.max_conviction_cap, 0);
-    }
+    let config = client.conviction_calibration();
+    assert_eq!(config.penalty_threshold_days, 0);
+    assert_eq!(config.penalty_multiplier, 1);
+    assert_eq!(config.reward_bonus_pct, 0);
+    assert_eq!(config.max_conviction_cap, 0);
+}
 
-    #[test]
-    fn conviction_calibration_admin_can_set_config() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+#[test]
+fn conviction_calibration_admin_can_set_config() {
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
-        let config = crate::conviction_voting::ConvictionCalibration {
-            penalty_threshold_days: 7,
-            penalty_multiplier: 2,
-            reward_bonus_pct: 10,
-            max_conviction_cap: 50_000,
-        };
-        let result = client.set_conviction_calibration(&admin, &config);
-        assert!(result.is_ok());
+    let config = crate::conviction_voting::ConvictionCalibration {
+        penalty_threshold_days: 7,
+        penalty_multiplier: 2,
+        reward_bonus_pct: 10,
+        max_conviction_cap: 50_000,
+    };
+    let result = client.set_conviction_calibration(&admin, &config);
+    assert!(result.is_ok());
 
-        let stored = client.conviction_calibration();
-        assert_eq!(stored.penalty_threshold_days, 7);
-        assert_eq!(stored.penalty_multiplier, 2);
-        assert_eq!(stored.reward_bonus_pct, 10);
-        assert_eq!(stored.max_conviction_cap, 50_000);
-    }
+    let stored = client.conviction_calibration();
+    assert_eq!(stored.penalty_threshold_days, 7);
+    assert_eq!(stored.penalty_multiplier, 2);
+    assert_eq!(stored.reward_bonus_pct, 10);
+    assert_eq!(stored.max_conviction_cap, 50_000);
+}
 
-    #[test]
-    fn conviction_calibration_non_admin_cannot_set_config() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+#[test]
+fn conviction_calibration_non_admin_cannot_set_config() {
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
-        let fake_admin = Address::generate(&env);
-        let config = crate::conviction_voting::ConvictionCalibration {
-            penalty_threshold_days: 3,
-            penalty_multiplier: 4,
-            reward_bonus_pct: 5,
-            max_conviction_cap: 10_000,
-        };
+    let fake_admin = Address::generate(&env);
+    let config = crate::conviction_voting::ConvictionCalibration {
+        penalty_threshold_days: 3,
+        penalty_multiplier: 4,
+        reward_bonus_pct: 5,
+        max_conviction_cap: 10_000,
+    };
 
-        let result = client.try_set_conviction_calibration(&fake_admin, &config);
-        assert_eq!(result, Err(Ok(GovernanceError::Unauthorized)));
-    }
+    let result = client.try_set_conviction_calibration(&fake_admin, &config);
+    assert_eq!(result, Err(Ok(GovernanceError::Unauthorized)));
+}
 
-    #[test]
-    fn conviction_calibration_rejects_invalid_multiplier() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+#[test]
+fn conviction_calibration_rejects_invalid_multiplier() {
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
-        let config = crate::conviction_voting::ConvictionCalibration {
-            penalty_threshold_days: 5,
-            penalty_multiplier: 0,
-            reward_bonus_pct: 0,
-            max_conviction_cap: 0,
-        };
-        let result = client.try_set_conviction_calibration(&admin, &config);
-        assert_eq!(result, Err(Ok(GovernanceError::InvalidCalibrationConfig)));
-    }
-    #[test]
-    fn conviction_calibration_rejects_invalid_reward_bonus() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+    let config = crate::conviction_voting::ConvictionCalibration {
+        penalty_threshold_days: 5,
+        penalty_multiplier: 0,
+        reward_bonus_pct: 0,
+        max_conviction_cap: 0,
+    };
+    let result = client.try_set_conviction_calibration(&admin, &config);
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidCalibrationConfig)));
+}
+#[test]
+fn conviction_calibration_rejects_invalid_reward_bonus() {
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
-        let config = crate::conviction_voting::ConvictionCalibration {
-            penalty_threshold_days: 5,
-            penalty_multiplier: 2,
-            reward_bonus_pct: 101,
-            max_conviction_cap: 0,
-        };
-        let result = client.try_set_conviction_calibration(&admin, &config);
-        assert_eq!(result, Err(Ok(GovernanceError::InvalidCalibrationConfig)));
-    }
+    let config = crate::conviction_voting::ConvictionCalibration {
+        penalty_threshold_days: 5,
+        penalty_multiplier: 2,
+        reward_bonus_pct: 101,
+        max_conviction_cap: 0,
+    };
+    let result = client.try_set_conviction_calibration(&admin, &config);
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidCalibrationConfig)));
+}
 
-    #[test]
-    fn conviction_calibration_penalty_short_votes() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+#[test]
+fn conviction_calibration_penalty_short_votes() {
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
-        let config = crate::conviction_voting::ConvictionCalibration {
-            penalty_threshold_days: 10,
-            penalty_multiplier: 2,
-            reward_bonus_pct: 0,
-            max_conviction_cap: 0,
-        };
-        client.set_conviction_calibration(&admin, &config);
+    let config = crate::conviction_voting::ConvictionCalibration {
+        penalty_threshold_days: 10,
+        penalty_multiplier: 2,
+        reward_bonus_pct: 0,
+        max_conviction_cap: 0,
+    };
+    client.set_conviction_calibration(&admin, &config);
 
-        let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
-        let proposal_id = client.create_conviction_proposal(
-            &pool_id,
-            &recipients.community_rewards,
-            &String::from_str(&env, "Test penalty"),
-            &10_000i128,
-            &recipients.public_sale,
-        );
+    let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
+    let proposal_id = client.create_conviction_proposal(
+        &pool_id,
+        &recipients.community_rewards,
+        &String::from_str(&env, "Test penalty"),
+        &10_000i128,
+        &recipients.public_sale,
+    );
 
-        client.vote_conviction(
-            &pool_id,
-            &proposal_id,
-            &recipients.community_rewards,
-            &1_000i128,
-        );
+    client.vote_conviction(
+        &pool_id,
+        &proposal_id,
+        &recipients.community_rewards,
+        &1_000i128,
+    );
 
-        env.ledger().set_timestamp(5 * 86_400);
-        let conviction = client.update_proposal_conviction(&pool_id, &proposal_id);
-        assert!(conviction > 0);
-        assert_eq!(conviction, 1);
-    }
+    env.ledger().set_timestamp(5 * 86_400);
+    let conviction = client.update_proposal_conviction(&pool_id, &proposal_id);
+    assert!(conviction > 0);
+    assert_eq!(conviction, 1);
+}
 
-    #[test]
-    fn conviction_calibration_reward_long_votes() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+#[test]
+fn conviction_calibration_reward_long_votes() {
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
-        let config = crate::conviction_voting::ConvictionCalibration {
-            penalty_threshold_days: 10,
-            penalty_multiplier: 1,
-            reward_bonus_pct: 20,
-            max_conviction_cap: 0,
-        };
-        client.set_conviction_calibration(&admin, &config);
+    let config = crate::conviction_voting::ConvictionCalibration {
+        penalty_threshold_days: 10,
+        penalty_multiplier: 1,
+        reward_bonus_pct: 20,
+        max_conviction_cap: 0,
+    };
+    client.set_conviction_calibration(&admin, &config);
 
-        let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
-        let proposal_id = client.create_conviction_proposal(
-            &pool_id,
-            &recipients.community_rewards,
-            &String::from_str(&env, "Test reward"),
-            &10_000i128,
-            &recipients.public_sale,
-        );
+    let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
+    let proposal_id = client.create_conviction_proposal(
+        &pool_id,
+        &recipients.community_rewards,
+        &String::from_str(&env, "Test reward"),
+        &10_000i128,
+        &recipients.public_sale,
+    );
 
-        client.vote_conviction(
-            &pool_id,
-            &proposal_id,
-            &recipients.community_rewards,
-            &1_000i128,
-        );
+    client.vote_conviction(
+        &pool_id,
+        &proposal_id,
+        &recipients.community_rewards,
+        &1_000i128,
+    );
 
-        env.ledger().set_timestamp(15 * 86_400);
-        let conviction = client.update_proposal_conviction(&pool_id, &proposal_id);
-        assert!(conviction >= 3);
-    }
+    env.ledger().set_timestamp(15 * 86_400);
+    let conviction = client.update_proposal_conviction(&pool_id, &proposal_id);
+    assert!(conviction >= 3);
+}
 
-    #[test]
-    fn conviction_calibration_caps_max_conviction() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+#[test]
+fn conviction_calibration_caps_max_conviction() {
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
-        let config = crate::conviction_voting::ConvictionCalibration {
-            penalty_threshold_days: 0,
-            penalty_multiplier: 1,
-            reward_bonus_pct: 0,
-            max_conviction_cap: 5,
-        };
-        client.set_conviction_calibration(&admin, &config);
+    let config = crate::conviction_voting::ConvictionCalibration {
+        penalty_threshold_days: 0,
+        penalty_multiplier: 1,
+        reward_bonus_pct: 0,
+        max_conviction_cap: 5,
+    };
+    client.set_conviction_calibration(&admin, &config);
 
-        let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
-        let proposal_id = client.create_conviction_proposal(
-            &pool_id,
-            &recipients.community_rewards,
-            &String::from_str(&env, "Test cap"),
-            &10_000i128,
-            &recipients.public_sale,
-        );
+    let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
+    let proposal_id = client.create_conviction_proposal(
+        &pool_id,
+        &recipients.community_rewards,
+        &String::from_str(&env, "Test cap"),
+        &10_000i128,
+        &recipients.public_sale,
+    );
 
-        client.vote_conviction(
-            &pool_id,
-            &proposal_id,
-            &recipients.community_rewards,
-            &1_000i128,
-        );
+    client.vote_conviction(
+        &pool_id,
+        &proposal_id,
+        &recipients.community_rewards,
+        &1_000i128,
+    );
 
-        env.ledger().set_timestamp(100 * 86_400);
-        let conviction = client.update_proposal_conviction(&pool_id, &proposal_id);
-        assert_eq!(conviction, 5);
-    }
+    env.ledger().set_timestamp(100 * 86_400);
+    let conviction = client.update_proposal_conviction(&pool_id, &proposal_id);
+    assert_eq!(conviction, 5);
+}
 
+#[test]
+fn conviction_calibration_combination_penalty_and_reward() {
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
+    let config = crate::conviction_voting::ConvictionCalibration {
+        penalty_threshold_days: 7,
+        penalty_multiplier: 3,
+        reward_bonus_pct: 10,
+        max_conviction_cap: 0,
+    };
+    client.set_conviction_calibration(&admin, &config);
 
+    let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
+    let proposal_id = client.create_conviction_proposal(
+        &pool_id,
+        &recipients.community_rewards,
+        &String::from_str(&env, "Test combo"),
+        &10_000i128,
+        &recipients.public_sale,
+    );
 
-    #[test]
-    fn conviction_calibration_combination_penalty_and_reward() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+    client.vote_conviction(
+        &pool_id,
+        &proposal_id,
+        &recipients.community_rewards,
+        &1_000i128,
+    );
 
-        let config = crate::conviction_voting::ConvictionCalibration {
-            penalty_threshold_days: 7,
-            penalty_multiplier: 3,
-            reward_bonus_pct: 10,
-            max_conviction_cap: 0,
-        };
-        client.set_conviction_calibration(&admin, &config);
+    env.ledger().set_timestamp(3 * 86_400);
+    let conviction_short = client.update_proposal_conviction(&pool_id, &proposal_id);
+    assert_eq!(conviction_short, 1);
 
-        let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
-        let proposal_id = client.create_conviction_proposal(
-            &pool_id,
-            &recipients.community_rewards,
-            &String::from_str(&env, "Test combo"),
-            &10_000i128,
-            &recipients.public_sale,
-        );
+    env.ledger().set_timestamp(14 * 86_400);
+    let conviction_long = client.update_proposal_conviction(&pool_id, &proposal_id);
+    assert!(conviction_long >= 3);
+    assert!(conviction_long > conviction_short);
+}
 
-        client.vote_conviction(
-            &pool_id,
-            &proposal_id,
-            &recipients.community_rewards,
-            &1_000i128,
-        );
+#[test]
+fn conviction_calibration_zero_threshold_disables_penalty() {
+    let (env, contract_id, admin, recipients) = setup();
+    let client = client(&env, &contract_id);
+    initialize(&client, &env, &admin, &recipients);
 
-        env.ledger().set_timestamp(3 * 86_400);
-        let conviction_short = client.update_proposal_conviction(&pool_id, &proposal_id);
-        assert_eq!(conviction_short, 1);
+    let config = crate::conviction_voting::ConvictionCalibration {
+        penalty_threshold_days: 0,
+        penalty_multiplier: 2,
+        reward_bonus_pct: 0,
+        max_conviction_cap: 0,
+    };
+    client.set_conviction_calibration(&admin, &config);
 
-        env.ledger().set_timestamp(14 * 86_400);
-        let conviction_long = client.update_proposal_conviction(&pool_id, &proposal_id);
-        assert!(conviction_long >= 3);
-        assert!(conviction_long > conviction_short);
-    }
+    let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
+    let proposal_id = client.create_conviction_proposal(
+        &pool_id,
+        &recipients.community_rewards,
+        &String::from_str(&env, "Test no penalty"),
+        &10_000i128,
+        &recipients.public_sale,
+    );
 
-    #[test]
-    fn conviction_calibration_zero_threshold_disables_penalty() {
-        let (env, contract_id, admin, recipients) = setup();
-        let client = client(&env, &contract_id);
-        initialize(&client, &env, &admin, &recipients);
+    client.vote_conviction(
+        &pool_id,
+        &proposal_id,
+        &recipients.community_rewards,
+        &1_000i128,
+    );
 
-        let config = crate::conviction_voting::ConvictionCalibration {
-            penalty_threshold_days: 0,
-            penalty_multiplier: 2,
-            reward_bonus_pct: 0,
-            max_conviction_cap: 0,
-        };
-        client.set_conviction_calibration(&admin, &config);
-
-        let pool_id = client.create_conviction_pool(&admin, &100_000i128, &1_000i128, &86_400u64);
-        let proposal_id = client.create_conviction_proposal(
-            &pool_id,
-            &recipients.community_rewards,
-            &String::from_str(&env, "Test no penalty"),
-            &10_000i128,
-            &recipients.public_sale,
-        );
-
-        client.vote_conviction(
-            &pool_id,
-            &proposal_id,
-            &recipients.community_rewards,
-            &1_000i128,
-        );
-
-        env.ledger().set_timestamp(86_400);
-        let conviction = client.update_proposal_conviction(&pool_id, &proposal_id);
-        assert_eq!(conviction, 1);
-    }
+    env.ledger().set_timestamp(86_400);
+    let conviction = client.update_proposal_conviction(&pool_id, &proposal_id);
+    assert_eq!(conviction, 1);
+}
 
 #[test]
 fn voting_power_uses_snapshot_not_live_balance() {
@@ -2336,7 +2325,10 @@ fn voting_power_uses_snapshot_not_live_balance() {
         &recipients.community_rewards,
         &ProposalType::SignalProposal(String::from_str(&env, "Snapshot test")),
         &String::from_str(&env, "Snapshot"),
-        &String::from_str(&env, "Voting power must be snapshotted at proposal creation"),
+        &String::from_str(
+            &env,
+            "Voting power must be snapshotted at proposal creation",
+        ),
         &Bytes::new(&env),
     );
 
@@ -2357,10 +2349,6 @@ fn voting_power_uses_snapshot_not_live_balance() {
     assert_eq!(proposal.votes_for, 120_000_000);
 
     // late_staker had 0 power at snapshot time — must be rejected with NoVotingPower
-    let result = client.try_cast_vote(
-        &proposal_id,
-        &late_staker,
-        &GovernanceVoteType::For,
-    );
+    let result = client.try_cast_vote(&proposal_id, &late_staker, &GovernanceVoteType::For);
     assert_eq!(result, Err(Ok(GovernanceError::NoVotingPower)));
 }

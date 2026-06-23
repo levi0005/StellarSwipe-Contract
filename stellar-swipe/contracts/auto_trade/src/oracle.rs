@@ -13,7 +13,7 @@ use stellar_swipe_common::oracle::{
     OraclePrice,
 };
 
-use crate::admin::{AdminStorageKey, require_admin};
+use crate::admin::{require_admin, AdminStorageKey};
 use crate::errors::AutoTradeError;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -73,10 +73,8 @@ pub fn set_oracle_address(
     env.storage()
         .instance()
         .set(&AdminStorageKey::OracleAddress, &oracle);
-    env.events().publish(
-        (Symbol::new(env, "oracle_set"), caller.clone()),
-        oracle,
-    );
+    env.events()
+        .publish((Symbol::new(env, "oracle_set"), caller.clone()), oracle);
     Ok(())
 }
 
@@ -134,10 +132,7 @@ pub fn get_mock_oracle_price(env: &Env, asset_pair: u32) -> Result<OraclePrice, 
 ///
 /// - On success: resets any previously tripped circuit breaker (auto-recovery).
 /// - On failure: trips the circuit breaker and emits `OracleCircuitBreakerTriggered`.
-pub fn get_aggregated_price(
-    env: &Env,
-    asset_pair: u32,
-) -> Result<OraclePrice, AutoTradeError> {
+pub fn get_aggregated_price(env: &Env, asset_pair: u32) -> Result<OraclePrice, AutoTradeError> {
     match get_oracle_price(env, asset_pair) {
         Ok(price) => {
             // Oracle is healthy — auto-reset the circuit breaker if it was tripped
@@ -145,10 +140,8 @@ pub fn get_aggregated_price(
             if state.triggered {
                 state.triggered = false;
                 set_cb_state(env, &state);
-                env.events().publish(
-                    (Symbol::new(env, "oracle_cb_reset"),),
-                    asset_pair,
-                );
+                env.events()
+                    .publish((Symbol::new(env, "oracle_cb_reset"),), asset_pair);
             }
             Ok(price)
         }
@@ -163,13 +156,11 @@ pub fn get_aggregated_price(
             let reason = match err {
                 OracleError::NotConfigured => String::from_str(env, "oracle_not_configured"),
                 OracleError::PriceNotFound => String::from_str(env, "price_not_found"),
-                OracleError::PriceStale    => String::from_str(env, "price_stale"),
-                OracleError::CallFailed    => String::from_str(env, "call_failed"),
+                OracleError::PriceStale => String::from_str(env, "price_stale"),
+                OracleError::CallFailed => String::from_str(env, "call_failed"),
             };
-            env.events().publish(
-                (Symbol::new(env, "oracle_cb_triggered"),),
-                reason,
-            );
+            env.events()
+                .publish((Symbol::new(env, "oracle_cb_triggered"),), reason);
             Err(AutoTradeError::OracleUnavailable)
         }
     }
@@ -182,10 +173,7 @@ pub fn get_aggregated_price(
 ///
 /// Also attempts auto-recovery: if the oracle is now healthy, the breaker is
 /// reset and trading proceeds.
-pub fn check_oracle_circuit_breaker(
-    env: &Env,
-    asset_pair: u32,
-) -> Result<(), AutoTradeError> {
+pub fn check_oracle_circuit_breaker(env: &Env, asset_pair: u32) -> Result<(), AutoTradeError> {
     let state = get_cb_state(env);
 
     // Admin override bypasses the circuit breaker entirely
@@ -205,10 +193,8 @@ pub fn check_oracle_circuit_breaker(
             let mut new_state = state;
             new_state.triggered = false;
             set_cb_state(env, &new_state);
-            env.events().publish(
-                (Symbol::new(env, "oracle_cb_reset"),),
-                asset_pair,
-            );
+            env.events()
+                .publish((Symbol::new(env, "oracle_cb_reset"),), asset_pair);
             Ok(())
         }
         Err(_) => Err(AutoTradeError::OracleUnavailable),
@@ -275,10 +261,8 @@ pub fn add_oracle(
     list.push_back(oracle_addr.clone());
     set_oracle_whitelist(env, asset_pair, &list);
 
-    env.events().publish(
-        (Symbol::new(env, "oracle_added"), asset_pair),
-        oracle_addr,
-    );
+    env.events()
+        .publish((Symbol::new(env, "oracle_added"), asset_pair), oracle_addr);
     Ok(())
 }
 
@@ -354,9 +338,7 @@ pub fn push_price_update(
     crate::risk::set_asset_price(env, asset_pair, scaled);
     crate::risk::record_price(env, asset_pair, scaled);
 
-    env.events().publish(
-        (Symbol::new(env, "oracle_price_upd"), asset_pair),
-        scaled,
-    );
+    env.events()
+        .publish((Symbol::new(env, "oracle_price_upd"), asset_pair), scaled);
     Ok(())
 }

@@ -28,7 +28,15 @@ pub fn get_active_signals(
     sort_by: SortOption,
     _category_filter: Option<SignalCategory>,
 ) -> Vec<SignalSummary> {
-    get_active_signals_internal(env, signals_map, provider_filter, offset, limit, sort_by, None)
+    get_active_signals_internal(
+        env,
+        signals_map,
+        provider_filter,
+        offset,
+        limit,
+        sort_by,
+        None,
+    )
 }
 
 pub fn get_active_signals_personalized(
@@ -95,7 +103,13 @@ fn get_active_signals_internal(
     }
 
     // 2. Sort: bottom-up merge sort, same order as historical bubble/insertion (O(n log n) passes).
-    sort_feed_mergesort(env, &mut active_signals, total_active, &sort_by, user.as_ref());
+    sort_feed_mergesort(
+        env,
+        &mut active_signals,
+        total_active,
+        &sort_by,
+        user.as_ref(),
+    );
 
     // 3. Paginate
     let mut results = Vec::new(env);
@@ -169,7 +183,9 @@ fn weighted_signal_score(
             } as i128;
             success_rate * 1_000 + social_boost + followed_boost
         }
-        SortOption::RecencyDesc => signal.timestamp as i128 * 10_000 + social_boost + followed_boost,
+        SortOption::RecencyDesc => {
+            signal.timestamp as i128 * 10_000 + social_boost + followed_boost
+        }
         SortOption::VolumeDesc => signal.total_volume + social_boost * 10 + followed_boost / 100,
     }
 }
@@ -197,13 +213,7 @@ fn sort_feed_mergesort(
             let mut i0 = st;
             let mut i1 = m;
             while i0 < m && i1 < e {
-                if !should_swap_pair(
-                    env,
-                    &v.get(i0).unwrap(),
-                    &v.get(i1).unwrap(),
-                    sort_by,
-                    user,
-                ) {
+                if !should_swap_pair(env, &v.get(i0).unwrap(), &v.get(i1).unwrap(), sort_by, user) {
                     nxt.push_back(v.get(i0).unwrap());
                     i0 += 1;
                 } else {
@@ -351,8 +361,8 @@ mod feed_tests {
                 avg_copier_roi_bps: 0,
                 copier_closed_count: 0,
                 warning_emitted: false,
-            benchmark_return_bps: None,
-            alpha_bps: None,
+                benchmark_return_bps: None,
+                alpha_bps: None,
             };
             m.set(id, s);
         }
@@ -388,9 +398,7 @@ mod feed_tests {
         ] {
             for off in [0u32, 3, 20] {
                 for lim in [0u32, 10, 25, 100] {
-                    let a = get_active_signals(
-                        &env, &map, None, off, lim, sort.clone(), None,
-                    );
+                    let a = get_active_signals(&env, &map, None, off, lim, sort.clone(), None);
                     let b = get_active_signals_bubble_historical(
                         &env, &map, None, off, lim, &sort, None,
                     );
@@ -409,15 +417,7 @@ mod feed_tests {
         let env = Env::default();
         let map = make_test_map(&env, 50);
         env.cost_estimate().budget().reset_tracker();
-        let _ = get_active_signals(
-            &env,
-            &map,
-            None,
-            0,
-            30,
-            SortOption::RecencyDesc,
-            None,
-        );
+        let _ = get_active_signals(&env, &map, None, 0, 30, SortOption::RecencyDesc, None);
         let after = env.cost_estimate().budget().cpu_instruction_cost();
         // Re-run with `cargo test get_active_signals_stays_under_half -- --nocapture` to log for PRs.
         assert!(

@@ -164,8 +164,7 @@ pub fn rank_quotes_by_price(env: &Env, quotes: &Vec<AmmQuote>) -> Vec<AmmQuote> 
         for j in (i + 1)..len {
             let qi = ranked.get(i).unwrap();
             let qj = ranked.get(j).unwrap();
-            if qj.expected_out * qi.available_in.max(1) > qi.expected_out * qj.available_in.max(1)
-            {
+            if qj.expected_out * qi.available_in.max(1) > qi.expected_out * qj.available_in.max(1) {
                 best_idx = j;
             }
         }
@@ -208,13 +207,18 @@ pub fn plan_multi_source_route(
                 continue;
             }
 
-            let impact = estimate_impact_slippage_bps(alloc, quote.available_in, quote.max_slippage_bps);
+            let impact =
+                estimate_impact_slippage_bps(alloc, quote.available_in, quote.max_slippage_bps);
             if impact > max_slippage_bps {
                 continue;
             }
 
             let out = alloc * quote.spot_price / BPS_DENOMINATOR;
-            let price = if alloc > 0 { out * BPS_DENOMINATOR / alloc } else { quote.spot_price };
+            let price = if alloc > 0 {
+                out * BPS_DENOMINATOR / alloc
+            } else {
+                quote.spot_price
+            };
             let notional = alloc * price / BPS_DENOMINATOR;
             let fee = apply_bps(notional, quote.fee_bps);
             let min_out = min_amount_out_with_slippage(out, max_slippage_bps).unwrap_or(0);

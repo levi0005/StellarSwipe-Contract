@@ -113,8 +113,6 @@ pub fn migrate_batch(env: &Env, batch_size: u32) -> u32 {
 }
 
 fn emit_migration_complete(env: &Env, user: &Address, open: u32, closed: u32) {
-    env.events().publish(
-        (symbol_short!("mig_done"), user.clone()),
-        (open, closed),
-    );
+    env.events()
+        .publish((symbol_short!("mig_done"), user.clone()), (open, closed));
 }

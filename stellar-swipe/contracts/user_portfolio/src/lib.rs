@@ -5,20 +5,23 @@
 mod achievements;
 mod badges;
 mod migration;
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod portfolio_tests;
 mod preferences;
 mod queries;
 mod storage;
 mod subscriptions;
 mod watchlist;
-#[cfg(test)]
-#[path = "tests/mod.rs"]
-mod portfolio_tests;
 
 pub use achievements::{Achievement, AchievementType};
 pub use badges::{Badge, BadgeType};
-pub use preferences::{HoldDuration, NotificationPrefs, RiskRating, SignalCategory, SignalAction, SignalSummary, TradingStyle};
+pub use preferences::{
+    HoldDuration, NotificationPrefs, RiskRating, SignalAction, SignalCategory, SignalSummary,
+    TradingStyle,
+};
 
-use soroban_sdk::{contract, contractimpl, contracterror, contracttype, Address, Env, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Vec};
 use storage::DataKey;
 
 pub use subscriptions::SubscriptionError;
@@ -447,16 +450,8 @@ impl UserPortfolio {
         let current_key = DataKey::CurrentStreak(user.clone());
         let best_key = DataKey::BestStreak(user.clone());
 
-        let mut current: u32 = env
-            .storage()
-            .persistent()
-            .get(&current_key)
-            .unwrap_or(0u32);
-        let mut best: u32 = env
-            .storage()
-            .persistent()
-            .get(&best_key)
-            .unwrap_or(0u32);
+        let mut current: u32 = env.storage().persistent().get(&current_key).unwrap_or(0u32);
+        let mut best: u32 = env.storage().persistent().get(&best_key).unwrap_or(0u32);
 
         if realized_pnl > 0 {
             // profitable close: increment streak
@@ -647,11 +642,7 @@ impl UserPortfolio {
     // ── Issue #430: Notification Preferences ─────────────────────────────────
 
     /// Store notification preferences for `user`. Caller must be `user`.
-    pub fn set_notification_preferences(
-        env: Env,
-        user: Address,
-        prefs: NotificationPrefs,
-    ) {
+    pub fn set_notification_preferences(env: Env, user: Address, prefs: NotificationPrefs) {
         preferences::set_notification_preferences(&env, &user, prefs);
     }
 
@@ -755,8 +746,8 @@ impl UserPortfolio {
 
 #[cfg(test)]
 mod streak_tests {
-    use super::*;
     use super::oracle_ok::OracleMock;
+    use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Env, Symbol};
 
@@ -784,20 +775,18 @@ mod streak_tests {
         }
 
         // Check stored streaks
-        let current: u32 = env
-            .as_contract(&contract_id, || {
-                env.storage()
-                    .persistent()
-                    .get(&DataKey::CurrentStreak(user.clone()))
-                    .unwrap_or(0u32)
-            });
-        let best: u32 = env
-            .as_contract(&contract_id, || {
-                env.storage()
-                    .persistent()
-                    .get(&DataKey::BestStreak(user.clone()))
-                    .unwrap_or(0u32)
-            });
+        let current: u32 = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::CurrentStreak(user.clone()))
+                .unwrap_or(0u32)
+        });
+        let best: u32 = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::BestStreak(user.clone()))
+                .unwrap_or(0u32)
+        });
 
         assert_eq!(current, 3);
         assert_eq!(best, 3);
@@ -821,20 +810,18 @@ mod streak_tests {
         client.close_position(&user, &id, &0, &80, &Address::generate(&env), &1);
 
         // current should be 0, best should be 2
-        let current: u32 = env
-            .as_contract(&contract_id, || {
-                env.storage()
-                    .persistent()
-                    .get(&DataKey::CurrentStreak(user.clone()))
-                    .unwrap_or(0u32)
-            });
-        let best: u32 = env
-            .as_contract(&contract_id, || {
-                env.storage()
-                    .persistent()
-                    .get(&DataKey::BestStreak(user.clone()))
-                    .unwrap_or(0u32)
-            });
+        let current: u32 = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::CurrentStreak(user.clone()))
+                .unwrap_or(0u32)
+        });
+        let best: u32 = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::BestStreak(user.clone()))
+                .unwrap_or(0u32)
+        });
 
         assert_eq!(current, 0);
         assert_eq!(best, 2);
@@ -1041,20 +1028,18 @@ mod migration_tests {
         for i in 0..USERS {
             let user = users.get(i as u32).unwrap();
 
-            let open_ids: soroban_sdk::Vec<u64> = env
-                .as_contract(&contract_id, || {
-                    env.storage()
-                        .persistent()
-                        .get(&DataKey::UserOpenPositions(user.clone()))
-                        .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
-                });
-            let closed_ids: soroban_sdk::Vec<u64> = env
-                .as_contract(&contract_id, || {
-                    env.storage()
-                        .persistent()
-                        .get(&DataKey::UserClosedPositions(user.clone()))
-                        .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
-                });
+            let open_ids: soroban_sdk::Vec<u64> = env.as_contract(&contract_id, || {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::UserOpenPositions(user.clone()))
+                    .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+            });
+            let closed_ids: soroban_sdk::Vec<u64> = env.as_contract(&contract_id, || {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::UserClosedPositions(user.clone()))
+                    .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+            });
 
             assert_eq!(open_ids.len(), OPEN as u32, "user {i}: open count mismatch");
             assert_eq!(
@@ -1609,15 +1594,11 @@ mod tests {
         client.open_position(&user, &100, &1_000);
 
         // First close — must succeed.
-        let first = client.try_close_position(
-            &user, &1, &50, &110i128, &1u32, &provider, &0u64,
-        );
+        let first = client.try_close_position(&user, &1, &50, &110i128, &1u32, &provider, &0u64);
         assert!(first.is_ok(), "first close should succeed");
 
         // Second close — must return PositionAlreadyClosed.
-        let second = client.try_close_position(
-            &user, &1, &50, &110i128, &1u32, &provider, &0u64,
-        );
+        let second = client.try_close_position(&user, &1, &50, &110i128, &1u32, &provider, &0u64);
         assert_eq!(second, Err(Ok(PositionError::PositionAlreadyClosed)));
     }
 

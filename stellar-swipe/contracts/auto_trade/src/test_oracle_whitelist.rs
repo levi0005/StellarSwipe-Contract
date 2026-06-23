@@ -3,11 +3,11 @@
 use super::*;
 use crate::admin;
 use crate::oracle;
-use stellar_swipe_common::oracle::OraclePrice;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     Env, Symbol,
 };
+use stellar_swipe_common::oracle::OraclePrice;
 
 fn setup() -> (Env, Address, Address) {
     let env = Env::default();

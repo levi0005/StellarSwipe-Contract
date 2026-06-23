@@ -6,11 +6,7 @@ use super::*;
 use crate::categories::{RiskLevel, SignalCategory};
 use crate::errors::AdminError;
 use crate::migration::test_seed_v1_signals;
-use soroban_sdk::{
-    testutils::Address as _,
-    testutils::Ledger,
-    vec, Env, Map, String,
-};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger, vec, Env, Map, String};
 
 #[test]
 fn test_initialize_and_admin() {

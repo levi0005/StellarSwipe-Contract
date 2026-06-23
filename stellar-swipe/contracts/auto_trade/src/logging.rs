@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
-use crate::admin::{require_admin};
+use crate::admin::require_admin;
 use crate::errors::AutoTradeError;
+use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,7 +33,9 @@ pub enum LoggingStorageKey {
 pub fn set_log_level(env: &Env, caller: &Address, level: LogLevel) -> Result<(), AutoTradeError> {
     require_admin(env, caller)?;
     caller.require_auth();
-    env.storage().instance().set(&LoggingStorageKey::Config, &level);
+    env.storage()
+        .instance()
+        .set(&LoggingStorageKey::Config, &level);
     Ok(())
 }
 
@@ -45,10 +47,7 @@ pub fn get_log_level(env: &Env) -> LogLevel {
 }
 
 pub fn is_info_logging_enabled(env: &Env) -> bool {
-    matches!(
-        get_log_level(env),
-        LogLevel::Debug | LogLevel::Info
-    )
+    matches!(get_log_level(env), LogLevel::Debug | LogLevel::Info)
 }
 
 pub fn emit_log(
@@ -72,7 +71,8 @@ pub fn emit_log(
         correlation_id: correlation_id.clone(),
     };
 
-    env.events().publish((Symbol::new(env, "log_entry"),), entry.clone());
+    env.events()
+        .publish((Symbol::new(env, "log_entry"),), entry.clone());
 
     let mut logs: Vec<LogEntry> = env
         .storage()
@@ -84,7 +84,9 @@ pub fn emit_log(
         logs.remove(0);
     }
     logs.push_back(entry);
-    env.storage().instance().set(&LoggingStorageKey::RecentLogs, &logs);
+    env.storage()
+        .instance()
+        .set(&LoggingStorageKey::RecentLogs, &logs);
 }
 
 fn should_log(configured: &LogLevel, event_level: &LogLevel) -> bool {

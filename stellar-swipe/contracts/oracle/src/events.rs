@@ -30,8 +30,10 @@ pub fn emit_oracle_slashed(env: &Env, oracle: Address, reason: &str, penalty: u3
 }
 
 pub fn emit_price_submitted(env: &Env, oracle: Address, price: i128) {
-    env.events()
-        .publish((Symbol::new(env, "oracle_price_submitted"),), (oracle, price));
+    env.events().publish(
+        (Symbol::new(env, "oracle_price_submitted"),),
+        (oracle, price),
+    );
 }
 
 pub fn emit_consensus_reached(env: &Env, price: i128, num_oracles: u32) {

@@ -62,12 +62,11 @@ fn unstake_tokens_clears_lock_on_success() {
     let contract_id = client.address.clone();
     env.as_contract(&contract_id, || {
         let lock_key = Symbol::new(&env, "UnstakeLock");
-        let locked: bool = env
-            .storage()
-            .temporary()
-            .get(&lock_key)
-            .unwrap_or(false);
-        assert!(!locked, "UnstakeLock was not cleared after successful unstake");
+        let locked: bool = env.storage().temporary().get(&lock_key).unwrap_or(false);
+        assert!(
+            !locked,
+            "UnstakeLock was not cleared after successful unstake"
+        );
     });
 }
 
@@ -85,11 +84,7 @@ fn unstake_tokens_clears_lock_on_error() {
     let contract_id = client.address.clone();
     env.as_contract(&contract_id, || {
         let lock_key = Symbol::new(&env, "UnstakeLock");
-        let locked: bool = env
-            .storage()
-            .temporary()
-            .get(&lock_key)
-            .unwrap_or(false);
+        let locked: bool = env.storage().temporary().get(&lock_key).unwrap_or(false);
         assert!(!locked, "UnstakeLock was not cleared after failed unstake");
     });
 }

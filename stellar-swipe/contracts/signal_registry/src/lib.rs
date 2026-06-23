@@ -14,11 +14,13 @@ mod expiry;
 mod fees;
 mod import;
 mod leaderboard;
+mod migration;
 mod ml_scoring;
+mod multisig_approvals;
 mod performance;
 mod query;
-pub mod reputation;
 mod reports;
+pub mod reputation;
 mod scheduling;
 mod scoring;
 mod social;
@@ -28,8 +30,6 @@ mod submission;
 mod templates;
 mod test_reputation;
 mod types;
-mod migration;
-mod multisig_approvals;
 mod validation;
 mod versioning;
 
@@ -42,10 +42,10 @@ use admin::{
     get_admin, get_admin_config, init_admin, is_trading_paused,
     require_not_paused_legacy as require_not_paused, AdminConfig,
 };
+use shared::version::{set_contract_version, SIGNAL_REGISTRY_VERSION};
 use stellar_swipe_common::emergency::PauseState;
 use stellar_swipe_common::rate_limit::{self as rl, ActionType as RLAction, RateLimitConfig};
 use stellar_swipe_common::SECONDS_PER_30_DAY_MONTH;
-use shared::version::{set_contract_version, SIGNAL_REGISTRY_VERSION};
 
 use combos::{
     cancel_combo, create_combo_signal, execute_combo_signal, get_combo, get_combo_executions_pub,
@@ -72,8 +72,8 @@ use reputation::{
 };
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Map, String, Vec};
 use stellar_swipe_common::{health_uninitialized, placeholder_admin, HealthStatus};
-use stellar_swipe_common::{ApprovalProposal, MultisigTimelockConfig, ProposalStatus};
 use stellar_swipe_common::{validate_asset_pair as validate_asset_pair_common, AssetPairError};
+use stellar_swipe_common::{ApprovalProposal, MultisigTimelockConfig, ProposalStatus};
 pub use templates::{SignalTemplate, SignalTemplateOverrides, StoredSignalTemplate};
 use templates::{SignalTemplate, DEFAULT_TEMPLATE_EXPIRY_HOURS};
 use types::{
@@ -521,7 +521,10 @@ impl SignalRegistry {
     }
 
     /// Read a proposal by id.
-    pub fn get_approval_proposal(env: Env, proposal_id: u64) -> Result<ApprovalProposal, AdminError> {
+    pub fn get_approval_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<ApprovalProposal, AdminError> {
         multisig_approvals::get_approval_proposal(&env, proposal_id)
     }
 
@@ -770,7 +773,12 @@ impl SignalRegistry {
                 }
             });
 
-        validation::validate_provider_signal_limit(env, &Self::get_signals_map(env), &provider, provider_stake_tier)?;
+        validation::validate_provider_signal_limit(
+            env,
+            &Self::get_signals_map(env),
+            &provider,
+            provider_stake_tier,
+        )?;
 
         // Rate limit: signal submission
         let trust = reputation::get_trust_score(env, &provider)
@@ -934,7 +942,7 @@ impl SignalRegistry {
        PERFORMANCE TRACKING FUNCTIONS
     ========================== */
     /// Get the composite quality score for a signal (0-100).
-    /// 
+    ///
     /// Combines success rate, adoption count, stake tier, and AI validation score
     /// into a single quality metric. If AI score is absent, its weight is redistributed
     /// to the success rate component.
@@ -953,11 +961,7 @@ impl SignalRegistry {
     /// signals are visible to any viewer. PREMIUM signals require an active on-chain
     /// subscription (via UserPortfolio [`check_subscription`]) unless the viewer is the
     /// signal provider.
-    pub fn get_signal_for_viewer(
-        env: Env,
-        signal_id: u64,
-        viewer: Address,
-    ) -> Option<Signal> {
+    pub fn get_signal_for_viewer(env: Env, signal_id: u64, viewer: Address) -> Option<Signal> {
         let signals = Self::get_signals_map(&env);
         let signal = signals.get(signal_id)?;
 
@@ -978,10 +982,7 @@ impl SignalRegistry {
         if viewer == signal.provider {
             return Some(signal);
         }
-        let portfolio: Address = env
-            .storage()
-            .instance()
-            .get(&StorageKey::UserPortfolio)?;
+        let portfolio: Address = env.storage().instance().get(&StorageKey::UserPortfolio)?;
         let allowed = Self::invoke_check_subscription(&env, &portfolio, &viewer, &signal.provider);
         if allowed {
             Some(signal)
@@ -1358,7 +1359,10 @@ impl SignalRegistry {
 
         // Update signal stats (general perf) and copier ROI (Issue #367)
         performance::update_signal_stats(&mut signal, &trade);
-        performance::update_copier_roi_stats(&mut signal, roi.clamp(i32::MIN as i128, i32::MAX as i128) as i32);
+        performance::update_copier_roi_stats(
+            &mut signal,
+            roi.clamp(i32::MIN as i128, i32::MAX as i128) as i32,
+        );
 
         // Evaluate new status
         let now = env.ledger().timestamp();
@@ -1503,13 +1507,8 @@ impl SignalRegistry {
         caller.require_auth();
 
         let mut signals = Self::get_signals_map(&env);
-        let (signals_cancelled, stake_slashed) = providers::ban_provider(
-            &env,
-            &mut signals,
-            &provider,
-            &reason_hash,
-            &stake_vault,
-        );
+        let (signals_cancelled, stake_slashed) =
+            providers::ban_provider(&env, &mut signals, &provider, &reason_hash, &stake_vault);
         Self::save_signals_map(&env, &signals);
 
         providers::emit_provider_banned(
@@ -2755,13 +2754,11 @@ mod test;
 #[cfg(test)]
 mod test;
 #[cfg(test)]
-mod test_multisig_approval;
-#[cfg(test)]
-mod test_adoption;
-#[cfg(test)]
-mod tests;
+mod test_admin_transfer;
 #[cfg(test)]
 mod test_admin_transfer;
+#[cfg(test)]
+mod test_adoption;
 #[cfg(test)]
 mod test_adoption;
 #[cfg(test)]
@@ -2769,8 +2766,10 @@ mod test_emergency;
 #[cfg(test)]
 mod test_health;
 #[cfg(test)]
+mod test_multisig_approval;
+#[cfg(test)]
 mod test_scheduling;
 #[cfg(test)]
 mod test_signal_issues;
 #[cfg(test)]
-mod test_admin_transfer;
+mod tests;

@@ -27,10 +27,10 @@ use committees::{
 };
 pub use committees::{
     Authority, Committee, CommitteeDecision, CrossCommitteeStatus, DecisionStatus,
+    ElectionResult as CommitteeElectionResult, ElectionStatus as CommitteeElectionStatus,
     EmergencyActionAuthority, EmergencyActionPayload, GrantApprovalAction, GrantApprovalAuthority,
     ParameterAdjustmentAuthority, PerformanceMetrics, RewardConfigUpdateAction,
     TreasurySpendAction, TreasurySpendAuthority, VetoAuthority, VetoPayload,
-    ElectionResult as CommitteeElectionResult, ElectionStatus as CommitteeElectionStatus,
 };
 use conviction_voting::{
     analyze_conviction_proposal, change_conviction_vote, create_conviction_pool,
@@ -52,6 +52,12 @@ use proposals::{
     default_governance_config, execute_proposal, finalize_proposal, get_all_proposals,
     get_governance_config, get_proposal, Proposal, ProposalStatistics, ProposalStatus,
     ProposalType, Vote, VoteDelegation, VoteType as GovernanceVoteType,
+};
+use quadratic_voting::{
+    allocate_vote_credits, calculate_marginal_cost, cast_quadratic_vote, compare_voting_systems,
+    get_quadratic_vote, get_quadratic_voting_config, get_vote_credits, reallocate_quadratic_votes,
+    refund_credits_on_failure, set_quadratic_voting_config, verify_identity, QuadraticVote,
+    QuadraticVotingConfig, VerificationMethod, VoteCredits, VotingComparison,
 };
 use reputation::{
     calculate_reputation_score, cast_reputation_weighted_vote, detect_staleness,
@@ -75,13 +81,6 @@ pub use token::{HolderAnalytics, HolderBalance, TokenMetadata};
 pub use treasury::{
     Budget, BudgetApproval, BudgetReport, RebalanceAction, RecurringPayment, Treasury,
     TreasuryReport, TreasurySpend,
-};
-use quadratic_voting::{
-    allocate_vote_credits, cast_quadratic_vote, compare_voting_systems, reallocate_quadratic_votes,
-    refund_credits_on_failure, verify_identity, get_vote_credits, get_quadratic_vote,
-    get_quadratic_voting_config, set_quadratic_voting_config, calculate_marginal_cost,
-    QuadraticVotingConfig, VoteCredits, QuadraticVote, VerificationMethod,
-    VotingComparison,
 };
 
 const DEFAULT_LIQUIDITY_REWARD_BPS: u32 = 100;
@@ -294,7 +293,11 @@ impl GovernanceContract {
     }
 
     /// Sets the global pause flag read by `health_check` (admin only).
-    pub fn set_contract_paused(env: Env, admin: Address, paused: bool) -> Result<(), GovernanceError> {
+    pub fn set_contract_paused(
+        env: Env,
+        admin: Address,
+        paused: bool,
+    ) -> Result<(), GovernanceError> {
         require_admin(&env, &admin)?;
         env.storage()
             .instance()

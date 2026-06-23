@@ -38,9 +38,7 @@ pub fn get_provider_monthly_report(
 
             if signal.timestamp >= month_start && signal.timestamp < month_end {
                 report.signals_submitted += 1;
-                report.total_adopters = report
-                    .total_adopters
-                    .saturating_add(signal.adoption_count);
+                report.total_adopters = report.total_adopters.saturating_add(signal.adoption_count);
 
                 if matches!(
                     signal.status,
@@ -106,7 +104,7 @@ fn days_in_month(month: u32) -> u64 {
 mod tests {
     use super::*;
     use crate::categories::{RiskLevel, SignalCategory};
-    use crate::types::{SignalAction, Signal};
+    use crate::types::{Signal, SignalAction};
     use soroban_sdk::{testutils::Address as _, Address, Env, Map, String};
 
     fn create_test_signal(
@@ -128,7 +126,11 @@ mod tests {
             expiry: timestamp + 86_400,
             status,
             executions: 1,
-            successful_executions: if status == SignalStatus::Successful { 1 } else { 0 },
+            successful_executions: if status == SignalStatus::Successful {
+                1
+            } else {
+                0
+            },
             total_volume: 1000,
             total_roi,
             category: SignalCategory::SWING,

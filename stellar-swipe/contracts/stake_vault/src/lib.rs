@@ -86,8 +86,12 @@ impl StakeVaultContract {
             panic!("already initialized");
         }
         env.storage().instance().set(&StorageKey::Admin, &admin);
-        env.storage().instance().set(&StorageKey::StakeToken, &stake_token);
-        env.storage().instance().set(&StorageKey::SignalRegistry, &signal_registry);
+        env.storage()
+            .instance()
+            .set(&StorageKey::StakeToken, &stake_token);
+        env.storage()
+            .instance()
+            .set(&StorageKey::SignalRegistry, &signal_registry);
     }
 
     /// Admin: set the minimum stake required for signal submission.
@@ -239,9 +243,7 @@ impl StakeVaultContract {
             .get(&MigrationKey::StakesV2)
             .unwrap_or_else(|| soroban_sdk::Map::new(env));
 
-        let info = stakes
-            .get(staker.clone())
-            .ok_or(StakeVaultError::NoStake)?;
+        let info = stakes.get(staker.clone()).ok_or(StakeVaultError::NoStake)?;
 
         if info.balance == 0 {
             return Err(StakeVaultError::NoStake);
@@ -270,11 +272,7 @@ impl StakeVaultContract {
             .set(&MigrationKey::StakesV2, &stakes);
 
         // Cross-contract call: transfer tokens back to staker.
-        token::Client::new(env, &token).transfer(
-            &env.current_contract_address(),
-            staker,
-            &amount,
-        );
+        token::Client::new(env, &token).transfer(&env.current_contract_address(), staker, &amount);
 
         Ok(amount)
     }
@@ -313,7 +311,9 @@ impl StakeVaultContract {
             .get(&MigrationKey::StakesV2)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
 
-        let mut info = stakes.get(provider.clone()).ok_or(StakeVaultError::NoStake)?;
+        let mut info = stakes
+            .get(provider.clone())
+            .ok_or(StakeVaultError::NoStake)?;
 
         if amount <= 0 || amount > info.balance {
             return Err(StakeVaultError::NoStake);

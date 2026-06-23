@@ -493,7 +493,13 @@ mod tests {
     #[test]
     fn test_timelock_config_delay_for_action_types() {
         let config = MultisigTimelockConfig::default_config();
-        assert_eq!(config.delay_for(&CriticalActionType::FeeChange), DEFAULT_FEE_CHANGE_DELAY);
-        assert_eq!(config.delay_for(&CriticalActionType::Pause), DEFAULT_PAUSE_DELAY);
+        assert_eq!(
+            config.delay_for(&CriticalActionType::FeeChange),
+            DEFAULT_FEE_CHANGE_DELAY
+        );
+        assert_eq!(
+            config.delay_for(&CriticalActionType::Pause),
+            DEFAULT_PAUSE_DELAY
+        );
     }
 }

@@ -5,8 +5,8 @@
 
 #![allow(dead_code)]
 
-use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 use crate::errors::AutoTradeError;
+use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -93,13 +93,22 @@ pub enum ConditionalKey {
 // ── Storage helpers ───────────────────────────────────────────────────────────
 
 fn next_id(env: &Env) -> u64 {
-    let id: u64 = env.storage().persistent().get(&ConditionalKey::Counter).unwrap_or(0) + 1;
-    env.storage().persistent().set(&ConditionalKey::Counter, &id);
+    let id: u64 = env
+        .storage()
+        .persistent()
+        .get(&ConditionalKey::Counter)
+        .unwrap_or(0)
+        + 1;
+    env.storage()
+        .persistent()
+        .set(&ConditionalKey::Counter, &id);
     id
 }
 
 fn save(env: &Env, order: &ConditionalOrder) {
-    env.storage().persistent().set(&ConditionalKey::Order(order.id), order);
+    env.storage()
+        .persistent()
+        .set(&ConditionalKey::Order(order.id), order);
 }
 
 fn load(env: &Env, id: u64) -> Result<ConditionalOrder, AutoTradeError> {
@@ -117,7 +126,9 @@ fn active_ids(env: &Env) -> Vec<u64> {
 }
 
 fn set_active_ids(env: &Env, ids: &Vec<u64>) {
-    env.storage().persistent().set(&ConditionalKey::ActiveOrders, ids);
+    env.storage()
+        .persistent()
+        .set(&ConditionalKey::ActiveOrders, ids);
 }
 
 fn add_active(env: &Env, id: u64) {
@@ -160,11 +171,15 @@ fn eval_condition(env: &Env, cond: &Condition, order: &ConditionalOrder) -> bool
         Condition::PriceDropRebound(asset_id, drop_bps, rebound_bps) => {
             let price = current_price(env, *asset_id);
             let ref_price = order.reference_price;
-            if ref_price == 0 { return false; }
+            if ref_price == 0 {
+                return false;
+            }
             // Drop threshold: ref_price * (10000 - drop_bps) / 10000
             let drop_threshold = ref_price * (10_000 - *drop_bps as i128) / 10_000;
             let trough = order.trough_price;
-            if trough == 0 || trough > drop_threshold { return false; }
+            if trough == 0 || trough > drop_threshold {
+                return false;
+            }
             // Rebound: price ≥ trough * (10000 + rebound_bps) / 10000
             let rebound_threshold = trough * (10_000 + *rebound_bps as i128) / 10_000;
             price >= rebound_threshold
@@ -172,8 +187,14 @@ fn eval_condition(env: &Env, cond: &Condition, order: &ConditionalOrder) -> bool
         Condition::VolatilityBreakout(asset_id, threshold_bps) => {
             let price = current_price(env, *asset_id);
             let ref_price = order.reference_price;
-            if ref_price == 0 { return false; }
-            let diff = if price > ref_price { price - ref_price } else { ref_price - price };
+            if ref_price == 0 {
+                return false;
+            }
+            let diff = if price > ref_price {
+                price - ref_price
+            } else {
+                ref_price - price
+            };
             diff * 10_000 >= ref_price * *threshold_bps as i128
         }
     }
@@ -270,10 +291,8 @@ pub fn cancel_conditional_order(env: &Env, id: u64, user: Address) -> Result<(),
     remove_active(env, id);
 
     #[allow(deprecated)]
-    env.events().publish(
-        (Symbol::new(env, "cond_order_cancelled"), user, id),
-        (),
-    );
+    env.events()
+        .publish((Symbol::new(env, "cond_order_cancelled"), user, id), ());
 
     Ok(())
 }
@@ -310,7 +329,11 @@ pub fn check_and_trigger(env: &Env) -> Vec<u64> {
             remove_active(env, id);
             #[allow(deprecated)]
             env.events().publish(
-                (Symbol::new(env, "cond_order_expired"), order.user.clone(), id),
+                (
+                    Symbol::new(env, "cond_order_expired"),
+                    order.user.clone(),
+                    id,
+                ),
                 (),
             );
             continue;
@@ -330,7 +353,11 @@ pub fn check_and_trigger(env: &Env) -> Vec<u64> {
 
             #[allow(deprecated)]
             env.events().publish(
-                (Symbol::new(env, "cond_order_triggered"), order.user.clone(), id),
+                (
+                    Symbol::new(env, "cond_order_triggered"),
+                    order.user.clone(),
+                    id,
+                ),
                 (order.asset_id, order.amount),
             );
         } else {
@@ -353,7 +380,11 @@ pub fn mark_executed(env: &Env, id: u64) -> Result<(), AutoTradeError> {
 
     #[allow(deprecated)]
     env.events().publish(
-        (Symbol::new(env, "cond_order_executed"), order.user.clone(), id),
+        (
+            Symbol::new(env, "cond_order_executed"),
+            order.user.clone(),
+            id,
+        ),
         (order.asset_id, order.amount),
     );
 
@@ -385,7 +416,12 @@ mod tests {
             .set(&RiskDataKey::AssetPrice(asset_id), &price);
     }
 
-    fn simple_price_condition(env: &Env, asset_id: u32, direction: PriceDirection, threshold: i128) -> Vec<Condition> {
+    fn simple_price_condition(
+        env: &Env,
+        asset_id: u32,
+        direction: PriceDirection,
+        threshold: i128,
+    ) -> Vec<Condition> {
         let mut v = Vec::new(env);
         v.push_back(Condition::Price(asset_id, direction, threshold));
         v
@@ -398,7 +434,18 @@ mod tests {
         let (env, user) = setup();
         set_price(&env, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 110_000);
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 3_600).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            3_600,
+        )
+        .unwrap();
         let order = get_conditional_order(&env, id).unwrap();
         assert_eq!(order.status, ConditionalStatus::Pending);
         assert_eq!(order.reference_price, 100_000);
@@ -409,7 +456,18 @@ mod tests {
         let (env, user) = setup();
         set_price(&env, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 110_000);
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 3_600).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            3_600,
+        )
+        .unwrap();
         cancel_conditional_order(&env, id, user).unwrap();
         let order = get_conditional_order(&env, id).unwrap();
         assert_eq!(order.status, ConditionalStatus::Cancelled);
@@ -421,8 +479,22 @@ mod tests {
         let other = Address::generate(&env);
         set_price(&env, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 110_000);
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 3_600).unwrap();
-        assert_eq!(cancel_conditional_order(&env, id, other), Err(AutoTradeError::Unauthorized));
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            3_600,
+        )
+        .unwrap();
+        assert_eq!(
+            cancel_conditional_order(&env, id, other),
+            Err(AutoTradeError::Unauthorized)
+        );
     }
 
     // ── price trigger ─────────────────────────────────────────────────────────
@@ -432,7 +504,18 @@ mod tests {
         let (env, user) = setup();
         set_price(&env, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 110_000);
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 3_600).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            3_600,
+        )
+        .unwrap();
 
         // Price not yet above threshold
         let triggered = check_and_trigger(&env);
@@ -443,7 +526,10 @@ mod tests {
         let triggered = check_and_trigger(&env);
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered.get(0).unwrap(), id);
-        assert_eq!(get_conditional_order(&env, id).unwrap().status, ConditionalStatus::Triggered);
+        assert_eq!(
+            get_conditional_order(&env, id).unwrap().status,
+            ConditionalStatus::Triggered
+        );
     }
 
     #[test]
@@ -451,7 +537,18 @@ mod tests {
         let (env, user) = setup();
         set_price(&env, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Below, 90_000);
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Sell, 500, 0, conditions, LogicOp::And, 3_600).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Sell,
+            500,
+            0,
+            conditions,
+            LogicOp::And,
+            3_600,
+        )
+        .unwrap();
 
         set_price(&env, 1, 85_000);
         let triggered = check_and_trigger(&env);
@@ -467,7 +564,18 @@ mod tests {
         set_price(&env, 1, 100_000);
         let mut conditions = Vec::new(&env);
         conditions.push_back(Condition::TimeAfter(2_000));
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 10_000).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            10_000,
+        )
+        .unwrap();
 
         // Time not yet reached
         let triggered = check_and_trigger(&env);
@@ -489,7 +597,18 @@ mod tests {
         let mut conditions = Vec::new(&env);
         // Drop 10% then rebound 3%
         conditions.push_back(Condition::PriceDropRebound(1, 1_000, 300));
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 10_000).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            10_000,
+        )
+        .unwrap();
 
         // Price drops to 89_000 (< 90_000 threshold) — trough updated, no rebound yet
         set_price(&env, 1, 89_000);
@@ -512,7 +631,18 @@ mod tests {
         let mut conditions = Vec::new(&env);
         // 5% breakout = 500 bps
         conditions.push_back(Condition::VolatilityBreakout(1, 500));
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 10_000).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            10_000,
+        )
+        .unwrap();
 
         set_price(&env, 1, 104_000); // only 4% — not enough
         let triggered = check_and_trigger(&env);
@@ -534,7 +664,18 @@ mod tests {
         let mut conditions = Vec::new(&env);
         conditions.push_back(Condition::Price(1, PriceDirection::Above, 110_000));
         conditions.push_back(Condition::Price(2, PriceDirection::Below, 40_000));
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 10_000).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            10_000,
+        )
+        .unwrap();
 
         // Only first condition met
         set_price(&env, 1, 115_000);
@@ -556,7 +697,18 @@ mod tests {
         let mut conditions = Vec::new(&env);
         conditions.push_back(Condition::Price(1, PriceDirection::Above, 110_000));
         conditions.push_back(Condition::Price(2, PriceDirection::Below, 40_000));
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::Or, 10_000).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::Or,
+            10_000,
+        )
+        .unwrap();
 
         // Only first condition met — OR should trigger
         set_price(&env, 1, 115_000);
@@ -572,13 +724,27 @@ mod tests {
         let (env, user) = setup();
         set_price(&env, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 200_000);
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 500).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            500,
+        )
+        .unwrap();
 
         // Advance past expiry (1_000 + 500 = 1_500)
         env.ledger().set_timestamp(1_600);
         let triggered = check_and_trigger(&env);
         assert_eq!(triggered.len(), 0);
-        assert_eq!(get_conditional_order(&env, id).unwrap().status, ConditionalStatus::Expired);
+        assert_eq!(
+            get_conditional_order(&env, id).unwrap().status,
+            ConditionalStatus::Expired
+        );
     }
 
     // ── mark_executed ─────────────────────────────────────────────────────────
@@ -588,13 +754,30 @@ mod tests {
         let (env, user) = setup();
         set_price(&env, 1, 120_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 110_000);
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 3_600).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            3_600,
+        )
+        .unwrap();
 
         check_and_trigger(&env);
-        assert_eq!(get_conditional_order(&env, id).unwrap().status, ConditionalStatus::Triggered);
+        assert_eq!(
+            get_conditional_order(&env, id).unwrap().status,
+            ConditionalStatus::Triggered
+        );
 
         mark_executed(&env, id).unwrap();
-        assert_eq!(get_conditional_order(&env, id).unwrap().status, ConditionalStatus::Executed);
+        assert_eq!(
+            get_conditional_order(&env, id).unwrap().status,
+            ConditionalStatus::Executed
+        );
     }
 
     #[test]
@@ -602,8 +785,22 @@ mod tests {
         let (env, user) = setup();
         set_price(&env, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 110_000);
-        let id = create_conditional_order(&env, user.clone(), 1, ConditionalSide::Buy, 1_000, 0, conditions, LogicOp::And, 3_600).unwrap();
+        let id = create_conditional_order(
+            &env,
+            user.clone(),
+            1,
+            ConditionalSide::Buy,
+            1_000,
+            0,
+            conditions,
+            LogicOp::And,
+            3_600,
+        )
+        .unwrap();
         // Still Pending — should fail
-        assert_eq!(mark_executed(&env, id), Err(AutoTradeError::ConditionalOrderNotTriggered));
+        assert_eq!(
+            mark_executed(&env, id),
+            Err(AutoTradeError::ConditionalOrderNotTriggered)
+        );
     }
 }

@@ -2,7 +2,7 @@
 //! Nonce-based replay protection (Issue: replay attack prevention).
 //! Wasm hash verification for cross-contract calls (Issue: contract hijacking prevention).
 
-use soroban_sdk::{contracttype, contracterror, Address, BytesN, Env};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env};
 
 /// Maximum allowed cross-contract call depth.
 pub const MAX_CALL_DEPTH: u32 = 5;
@@ -139,7 +139,10 @@ mod tests {
         let user = soroban_sdk::Address::generate(&env);
         env.as_contract(&contract_id, || {
             consume_nonce(&env, &user, 42).unwrap();
-            assert_eq!(consume_nonce(&env, &user, 42), Err(NonceError::NonceAlreadyUsed));
+            assert_eq!(
+                consume_nonce(&env, &user, 42),
+                Err(NonceError::NonceAlreadyUsed)
+            );
         });
     }
 
@@ -150,7 +153,8 @@ mod tests {
         env.as_contract(&contract_id, || {
             consume_nonce(&env, &user, 7).unwrap();
             // Advance ledger past TTL
-            env.ledger().with_mut(|l| l.sequence_number += NONCE_TTL_LEDGERS + 1);
+            env.ledger()
+                .with_mut(|l| l.sequence_number += NONCE_TTL_LEDGERS + 1);
             // After expiry the key is gone; a new consume should succeed
             assert!(consume_nonce(&env, &user, 7).is_ok());
         });
@@ -225,7 +229,10 @@ mod tests {
 
     #[test]
     fn depth_at_limit_fails() {
-        assert_eq!(check_call_depth(MAX_CALL_DEPTH), Err(CallDepthError::CallDepthExceeded));
+        assert_eq!(
+            check_call_depth(MAX_CALL_DEPTH),
+            Err(CallDepthError::CallDepthExceeded)
+        );
     }
 
     #[test]

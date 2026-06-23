@@ -4,12 +4,12 @@ use soroban_sdk::{contracttype, Address, Env, IntoVal, Symbol, Vec};
 
 use stellar_swipe_common::amm_bridge::{
     build_fallback_chain, emit_fallback_used, emit_quote_discovered, emit_route_planned,
-    min_amount_out_with_slippage, plan_multi_source_route, rank_quotes_by_price, AmmQuote, AmmRoutePlan, AmmSourceConfig, AmmSourceKind,
-    FN_GET_BEST_ASK,
+    min_amount_out_with_slippage, plan_multi_source_route, rank_quotes_by_price, AmmQuote,
+    AmmRoutePlan, AmmSourceConfig, AmmSourceKind, FN_GET_BEST_ASK,
 };
 
 use crate::errors::AutoTradeError;
-use crate::sdex::{ExecutionResult, execute_market_order};
+use crate::sdex::{execute_market_order, ExecutionResult};
 use crate::smart_routing::{self, LiquidityVenue, VenueLiquidity};
 use crate::storage::Signal;
 
@@ -44,10 +44,7 @@ fn kind_to_venue(kind: AmmSourceKind) -> LiquidityVenue {
     }
 }
 
-pub fn register_amm_source(
-    env: &Env,
-    config: AmmSourceConfig,
-) -> Result<(), AutoTradeError> {
+pub fn register_amm_source(env: &Env, config: AmmSourceConfig) -> Result<(), AutoTradeError> {
     if config.source_id == 0 {
         return Err(AutoTradeError::InvalidAmount);
     }
@@ -83,12 +80,7 @@ pub fn get_amm_sources(env: &Env) -> Vec<AmmSourceConfig> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
-pub fn set_signal_token_pair(
-    env: &Env,
-    signal_id: u64,
-    from_token: Address,
-    to_token: Address,
-) {
+pub fn set_signal_token_pair(env: &Env, signal_id: u64, from_token: Address, to_token: Address) {
     env.storage()
         .persistent()
         .set(&AmmBridgeKey::SignalTokenFrom(signal_id), &from_token);
@@ -130,11 +122,7 @@ fn query_router_best_ask(
 }
 
 /// Price discovery: merge stored venue quotes with on-chain router quotes.
-pub fn discover_quotes(
-    env: &Env,
-    signal_id: u64,
-    probe_amount: i128,
-) -> Vec<AmmQuote> {
+pub fn discover_quotes(env: &Env, signal_id: u64, probe_amount: i128) -> Vec<AmmQuote> {
     let mut quotes = Vec::new(env);
 
     for venue in smart_routing::get_venue_liquidity(env, signal_id).iter() {
@@ -149,16 +137,14 @@ pub fn discover_quotes(
             if !source.enabled {
                 continue;
             }
-            if let Some((price, qty)) = query_router_best_ask(
-                env,
-                &source.router,
-                &pair.from_token,
-                &pair.to_token,
-            ) {
+            if let Some((price, qty)) =
+                query_router_best_ask(env, &source.router, &pair.from_token, &pair.to_token)
+            {
                 if qty <= 0 || price <= 0 {
                     continue;
                 }
-                let expected_out = probe_amount * price / stellar_swipe_common::amm_bridge::BPS_DENOMINATOR;
+                let expected_out =
+                    probe_amount * price / stellar_swipe_common::amm_bridge::BPS_DENOMINATOR;
                 let q = AmmQuote {
                     kind: source.kind,
                     source_id: source.source_id,
@@ -177,7 +163,10 @@ pub fn discover_quotes(
     rank_quotes_by_price(env, &quotes)
 }
 
-fn quote_from_venue(venue: &VenueLiquidity, probe_amount: i128) -> Result<AmmQuote, AutoTradeError> {
+fn quote_from_venue(
+    venue: &VenueLiquidity,
+    probe_amount: i128,
+) -> Result<AmmQuote, AutoTradeError> {
     let kind = venue_to_kind(venue.venue);
     let alloc = core::cmp::min(probe_amount, venue.available_amount);
     if alloc <= 0 {
@@ -205,18 +194,12 @@ pub fn plan_amm_route(
     if quotes.is_empty() {
         return Err(AutoTradeError::RoutingPlanNotFound);
     }
-    plan_multi_source_route(
-        env,
-        &quotes,
-        amount,
-        signal.price,
-        max_slippage_bps,
-    )
-    .map_err(map_bridge_error)
-    .map(|plan| {
-        emit_route_planned(env, signal.signal_id, &plan);
-        plan
-    })
+    plan_multi_source_route(env, &quotes, amount, signal.price, max_slippage_bps)
+        .map_err(map_bridge_error)
+        .map(|plan| {
+            emit_route_planned(env, signal.signal_id, &plan);
+            plan
+        })
 }
 
 fn map_bridge_error(err: stellar_swipe_common::amm_bridge::AmmBridgeError) -> AutoTradeError {
@@ -307,11 +290,7 @@ fn execute_segment(
     Err(AutoTradeError::AtomicExecutionFailed)
 }
 
-fn find_source_config(
-    env: &Env,
-    kind: AmmSourceKind,
-    source_id: u32,
-) -> Option<AmmSourceConfig> {
+fn find_source_config(env: &Env, kind: AmmSourceKind, source_id: u32) -> Option<AmmSourceConfig> {
     for src in get_amm_sources(env).iter() {
         if src.kind == kind && src.source_id == source_id && src.enabled {
             return Some(src);
@@ -402,8 +381,7 @@ pub fn execute_swap_with_fallback(
                     let expected_out =
                         amount * price / stellar_swipe_common::amm_bridge::BPS_DENOMINATOR;
                     let min_out =
-                        min_amount_out_with_slippage(expected_out, max_slippage_bps)
-                            .unwrap_or(0);
+                        min_amount_out_with_slippage(expected_out, max_slippage_bps).unwrap_or(0);
                     if invoke_router_swap(
                         env,
                         &src.router,
@@ -439,11 +417,7 @@ pub mod mock_router {
 
     #[contractimpl]
     impl MockAmmRouter {
-        pub fn get_best_ask(
-            env: Env,
-            _from: Address,
-            _to: Address,
-        ) -> (i128, i128) {
+        pub fn get_best_ask(env: Env, _from: Address, _to: Address) -> (i128, i128) {
             env.storage()
                 .instance()
                 .get(&symbol_short!("ask"))
@@ -457,15 +431,11 @@ pub mod mock_router {
         }
 
         pub fn set_amount_out(env: Env, out: i128) {
-            env.storage()
-                .instance()
-                .set(&symbol_short!("amtout"), &out);
+            env.storage().instance().set(&symbol_short!("amtout"), &out);
         }
 
         pub fn set_fail_swap(env: Env, fail: bool) {
-            env.storage()
-                .instance()
-                .set(&symbol_short!("fail"), &fail);
+            env.storage().instance().set(&symbol_short!("fail"), &fail);
         }
 
         pub fn swap(

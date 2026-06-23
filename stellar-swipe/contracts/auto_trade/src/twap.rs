@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 use crate::errors::AutoTradeError;
+use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,34 +57,57 @@ pub enum TWAPStorageKey {
 
 // Storage functions
 pub fn get_next_twap_id(env: &Env) -> u64 {
-    let counter: u64 = env.storage().persistent().get(&TWAPStorageKey::Counter).unwrap_or(0);
+    let counter: u64 = env
+        .storage()
+        .persistent()
+        .get(&TWAPStorageKey::Counter)
+        .unwrap_or(0);
     let next_id = counter + 1;
-    env.storage().persistent().set(&TWAPStorageKey::Counter, &next_id);
+    env.storage()
+        .persistent()
+        .set(&TWAPStorageKey::Counter, &next_id);
     next_id
 }
 
 pub fn store_twap_order(env: &Env, order_id: u64, order: &TWAPOrder) {
-    env.storage().persistent().set(&TWAPStorageKey::Order(order_id), order);
-    
+    env.storage()
+        .persistent()
+        .set(&TWAPStorageKey::Order(order_id), order);
+
     // Add to active orders list if active
-    let mut active_orders: Vec<u64> = env.storage().persistent().get(&TWAPStorageKey::ActiveOrders).unwrap_or_else(|| Vec::new(env));
+    let mut active_orders: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&TWAPStorageKey::ActiveOrders)
+        .unwrap_or_else(|| Vec::new(env));
     if order.status == TWAPStatus::Active && !active_orders.contains(order_id) {
         active_orders.push_back(order_id);
-        env.storage().persistent().set(&TWAPStorageKey::ActiveOrders, &active_orders);
+        env.storage()
+            .persistent()
+            .set(&TWAPStorageKey::ActiveOrders, &active_orders);
     } else if order.status != TWAPStatus::Active && order.status != TWAPStatus::Paused {
         if let Some(pos) = active_orders.first_index_of(order_id) {
             active_orders.remove(pos);
-            env.storage().persistent().set(&TWAPStorageKey::ActiveOrders, &active_orders);
+            env.storage()
+                .persistent()
+                .set(&TWAPStorageKey::ActiveOrders, &active_orders);
         }
     }
 }
 
 pub fn get_twap_order(env: &Env, order_id: u64) -> Result<TWAPOrder, AutoTradeError> {
-    env.storage().persistent().get(&TWAPStorageKey::Order(order_id)).ok_or(AutoTradeError::TWAPOrderNotFound)
+    env.storage()
+        .persistent()
+        .get(&TWAPStorageKey::Order(order_id))
+        .ok_or(AutoTradeError::TWAPOrderNotFound)
 }
 
 pub fn get_active_twap_orders(env: &Env) -> Vec<TWAPOrder> {
-    let active_ids: Vec<u64> = env.storage().persistent().get(&TWAPStorageKey::ActiveOrders).unwrap_or_else(|| Vec::new(env));
+    let active_ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&TWAPStorageKey::ActiveOrders)
+        .unwrap_or_else(|| Vec::new(env));
     let mut active_orders = Vec::new(env);
     for id in active_ids.iter() {
         if let Some(order) = env.storage().persistent().get(&TWAPStorageKey::Order(id)) {
@@ -118,7 +141,11 @@ fn get_price_history(env: &Env, pair: &AssetPair, window: u32) -> Vec<i128> {
         .unwrap_or_else(|| Vec::new(env));
     let mut recent = Vec::new(env);
     let window = window.max(1);
-    let start = if all.len() > window { all.len() - window } else { 0 };
+    let start = if all.len() > window {
+        all.len() - window
+    } else {
+        0
+    };
     for i in start..all.len() {
         if let Some(price) = all.get(i) {
             recent.push_back(price);
@@ -209,7 +236,7 @@ pub fn create_twap_order(
     }
 
     let duration_seconds = duration_minutes as u64 * 60;
-    
+
     // Default: 1 segment per 5% of duration, min 4
     let default_segments = (duration_minutes / 5).max(4);
     let segments = num_segments.unwrap_or(default_segments);
@@ -263,15 +290,21 @@ pub fn execute_twap_segments(env: &Env) -> Vec<u64> {
             continue;
         }
 
-        let elapsed = if current > twap.start_time { current - twap.start_time } else { 0 };
+        let elapsed = if current > twap.start_time {
+            current - twap.start_time
+        } else {
+            0
+        };
         let expected_segments = (elapsed / twap.interval_seconds.max(1)) as u32;
 
-        while twap.segments_executed < expected_segments && twap.segments_executed < twap.total_segments {
+        while twap.segments_executed < expected_segments
+            && twap.segments_executed < twap.total_segments
+        {
             // Execute segment
             match execute_twap_segment(env, &mut twap) {
                 Ok(trade_id) => {
                     executed_ids.push_back(trade_id);
-                },
+                }
                 Err(_e) => {
                     #[allow(deprecated)]
                     env.events().publish(
@@ -317,7 +350,11 @@ fn execute_twap_segment(env: &Env, twap: &mut TWAPOrder) -> Result<u64, AutoTrad
 
     #[allow(deprecated)]
     env.events().publish(
-        (Symbol::new(env, "TWAPSegmentExecuted"), twap.id, twap.segments_executed),
+        (
+            Symbol::new(env, "TWAPSegmentExecuted"),
+            twap.id,
+            twap.segments_executed,
+        ),
         (simulated_fill, simulated_price),
     );
 
@@ -362,19 +399,26 @@ pub fn adjust_twap_strategy(env: &Env, order_id: u64) -> Result<(), AutoTradeErr
 
     if current_volatility > baseline_volatility * 150 / 100 {
         twap.interval_seconds = twap.interval_seconds * 150 / 100;
-        
+
         #[allow(deprecated)]
         env.events().publish(
             (Symbol::new(env, "TWAPAdjusted"), order_id),
-            (String::from_str(env, "High volatility"), twap.interval_seconds),
+            (
+                String::from_str(env, "High volatility"),
+                twap.interval_seconds,
+            ),
         );
         store_twap_order(env, order_id, &twap);
     }
-    
+
     Ok(())
 }
 
-pub fn cancel_twap_order(env: &Env, order_id: u64, user: Address) -> Result<CancellationSummary, AutoTradeError> {
+pub fn cancel_twap_order(
+    env: &Env,
+    order_id: u64,
+    user: Address,
+) -> Result<CancellationSummary, AutoTradeError> {
     user.require_auth();
     let mut twap = get_twap_order(env, order_id)?;
 
@@ -417,7 +461,11 @@ fn get_market_price(_env: &Env, _pair: &AssetPair) -> Result<i128, AutoTradeErro
     Ok(100_000)
 }
 
-fn calculate_volatility(_env: &Env, _pair: &AssetPair, _period: u32) -> Result<u32, AutoTradeError> {
+fn calculate_volatility(
+    _env: &Env,
+    _pair: &AssetPair,
+    _period: u32,
+) -> Result<u32, AutoTradeError> {
     Ok(1500)
 }
 
@@ -470,8 +518,9 @@ mod tests {
             quote: String::from_str(&env, "USDC"),
         };
 
-        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 12000, 60, Some(12), None).unwrap();
-        
+        let order_id =
+            create_twap_order(&env, user.clone(), pair.clone(), 12000, 60, Some(12), None).unwrap();
+
         let twap_before = get_twap_order(&env, order_id).unwrap();
         assert_eq!(twap_before.amount_per_segment, 1000);
 
@@ -502,8 +551,9 @@ mod tests {
             quote: String::from_str(&env, "USD"),
         };
 
-        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 6000, 60, Some(6), None).unwrap();
-        
+        let order_id =
+            create_twap_order(&env, user.clone(), pair.clone(), 6000, 60, Some(6), None).unwrap();
+
         // Execute 2 segments (20 minutes pass)
         env.ledger().set_timestamp(1_000 + 1201);
         execute_twap_segments(&env);
@@ -526,7 +576,8 @@ mod tests {
         };
 
         // Create with 10 minute interval
-        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 1000, 100, Some(10), None).unwrap();
+        let order_id =
+            create_twap_order(&env, user.clone(), pair.clone(), 1000, 100, Some(10), None).unwrap();
         let initial_interval = get_twap_order(&env, order_id).unwrap().interval_seconds;
         assert_eq!(initial_interval, 600);
 
@@ -546,12 +597,13 @@ mod tests {
             quote: String::from_str(&env, "USDC"),
         };
 
-        let order_id = create_twap_order(&env, user.clone(), pair.clone(), 5000, 50, Some(5), None).unwrap();
-        
+        let order_id =
+            create_twap_order(&env, user.clone(), pair.clone(), 5000, 50, Some(5), None).unwrap();
+
         // Fast forward beyond the entire duration (50 mins = 3000 seconds)
         env.ledger().set_timestamp(1_000 + 3001);
         let executed_ids = execute_twap_segments(&env);
-        
+
         assert_eq!(executed_ids.len(), 5);
 
         let twap = get_twap_order(&env, order_id).unwrap();

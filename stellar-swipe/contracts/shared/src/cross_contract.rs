@@ -1,8 +1,10 @@
 #![no_std]
 
-use soroban_sdk::{contractclient, contracterror, contracttype, Address, Bytes, Env, String, Symbol, Vec};
 use crate::auth::{check_call_depth, verify_wasm_hash, MAX_CALL_DEPTH};
 use crate::version::check_compatible;
+use soroban_sdk::{
+    contractclient, contracterror, contracttype, Address, Bytes, Env, String, Symbol, Vec,
+};
 
 pub const MAX_MESSAGE_SIZE: u32 = 2048;
 pub const MAX_AUTHORIZED_CALLERS: u32 = 32;
@@ -61,7 +63,10 @@ pub trait CrossContractVersionTrait {
 
 #[contractclient(name = "CrossContractMessageReceiverClient")]
 pub trait CrossContractMessageReceiverTrait {
-    fn receive_message(env: Env, message: CrossContractMessage) -> Result<MessageStatus, CrossContractError>;
+    fn receive_message(
+        env: Env,
+        message: CrossContractMessage,
+    ) -> Result<MessageStatus, CrossContractError>;
 }
 
 fn next_message_id(env: &Env) -> u64 {
@@ -126,7 +131,10 @@ pub fn authorize_caller(
     }
 }
 
-pub fn verify_expected_contract_hash(env: &Env, contract_id: &Address) -> Result<(), CrossContractError> {
+pub fn verify_expected_contract_hash(
+    env: &Env,
+    contract_id: &Address,
+) -> Result<(), CrossContractError> {
     verify_wasm_hash(env, contract_id).map_err(|_| CrossContractError::ContractHashMismatch)
 }
 
@@ -158,7 +166,8 @@ pub fn send_cross_contract_message(
 ) -> Result<u64, CrossContractError> {
     sender.require_auth();
     validate_payload(env, &payload)?;
-    let next_depth = check_call_depth(call_depth).map_err(|_| CrossContractError::CallDepthExceeded)?;
+    let next_depth =
+        check_call_depth(call_depth).map_err(|_| CrossContractError::CallDepthExceeded)?;
 
     let id = next_message_id(env);
     let now = env.ledger().timestamp();
@@ -319,13 +328,23 @@ mod tests {
     fn validate_callee_version_fails_when_incompatible() {
         let env = Env::default();
         let v_contract = env.register(VersionedContract, ());
-        let result = validate_callee_version(&env, &v_contract, crate::version::ContractKind::SignalRegistry);
+        let result = validate_callee_version(
+            &env,
+            &v_contract,
+            crate::version::ContractKind::SignalRegistry,
+        );
         assert_eq!(result, Err(CrossContractError::VersionMismatch));
     }
 
     #[test]
     fn call_depth_limit_is_enforced() {
-        assert_eq!(check_call_depth(MAX_CALL_DEPTH - 1).map_err(|_| CrossContractError::CallDepthExceeded), Ok(MAX_CALL_DEPTH));
-        assert_eq!(check_call_depth(MAX_CALL_DEPTH).map_err(|_| CrossContractError::CallDepthExceeded), Err(CrossContractError::CallDepthExceeded));
+        assert_eq!(
+            check_call_depth(MAX_CALL_DEPTH - 1).map_err(|_| CrossContractError::CallDepthExceeded),
+            Ok(MAX_CALL_DEPTH)
+        );
+        assert_eq!(
+            check_call_depth(MAX_CALL_DEPTH).map_err(|_| CrossContractError::CallDepthExceeded),
+            Err(CrossContractError::CallDepthExceeded)
+        );
     }
 }

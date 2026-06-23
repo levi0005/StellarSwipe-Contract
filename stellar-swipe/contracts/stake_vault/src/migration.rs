@@ -89,7 +89,11 @@ pub struct MigrationRecoveryResult {
 #[derive(Debug, PartialEq)]
 pub enum MigrationError {
     Unauthorized,
-    BalanceMismatch { provider: Address, old: i128, new: i128 },
+    BalanceMismatch {
+        provider: Address,
+        old: i128,
+        new: i128,
+    },
     AlreadyComplete,
     /// Provider is not in `pending_recovery`; nothing to recover.
     NotInRecovery,
@@ -189,16 +193,20 @@ fn emit_batch_progress(
     #[allow(deprecated)]
     env.events().publish(
         (symbol_short!("mig_prog"),),
-        (batch_number, migrated_this_batch, total_migrated, total_v1, pending_recovery_count),
+        (
+            batch_number,
+            migrated_this_batch,
+            total_migrated,
+            total_v1,
+            pending_recovery_count,
+        ),
     );
 }
 
 fn emit_migration_complete(env: &Env, total_migrated: u32) {
     #[allow(deprecated)]
-    env.events().publish(
-        (symbol_short!("mig_done"),),
-        (total_migrated,),
-    );
+    env.events()
+        .publish((symbol_short!("mig_done"),), (total_migrated,));
 }
 
 fn emit_recovery(env: &Env, provider: Address, corrected_balance: i128, remaining_recovery: u32) {
@@ -249,7 +257,12 @@ pub fn migrate_stakes_v1_to_v2(
     }
 
     state.batch_number += 1;
-    emit_batch_start(env, state.batch_number, pending.len(), state.pending_recovery.len());
+    emit_batch_start(
+        env,
+        state.batch_number,
+        pending.len(),
+        state.pending_recovery.len(),
+    );
 
     let to_process = batch_size.min(pending.len());
     let mut migrated_this_batch = 0u32;
@@ -286,8 +299,7 @@ pub fn migrate_stakes_v1_to_v2(
     }
 
     // Complete only when every V1 provider is migrated and recovery queue is clear.
-    let all_accounted =
-        state.migrated.len() + state.pending_recovery.len() >= total_v1;
+    let all_accounted = state.migrated.len() + state.pending_recovery.len() >= total_v1;
     state.complete = all_accounted && state.pending_recovery.len() == 0;
 
     save_v2(env, &v2);
@@ -298,7 +310,14 @@ pub fn migrate_stakes_v1_to_v2(
     let pending_recovery_count = state.pending_recovery.len();
     let complete = state.complete;
 
-    emit_batch_progress(env, batch_number, migrated_this_batch, total_migrated, total_v1, pending_recovery_count);
+    emit_batch_progress(
+        env,
+        batch_number,
+        migrated_this_batch,
+        total_migrated,
+        total_v1,
+        pending_recovery_count,
+    );
     if complete {
         emit_migration_complete(env, total_migrated);
     }
@@ -349,8 +368,7 @@ pub fn recover_migration_entry(
     state.migrated.push_back(provider.clone());
 
     let total_v1 = state.total_v1_providers;
-    let all_accounted =
-        state.migrated.len() + state.pending_recovery.len() >= total_v1;
+    let all_accounted = state.migrated.len() + state.pending_recovery.len() >= total_v1;
     state.complete = all_accounted && state.pending_recovery.len() == 0;
 
     let remaining_recovery = state.pending_recovery.len();

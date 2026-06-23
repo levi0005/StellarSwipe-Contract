@@ -307,11 +307,7 @@ pub fn enforce_correlation_limits(
 
 /// Return up to 5 asset IDs from `available` that have low average correlation
 /// with the user's current holdings.
-pub fn suggest_diversification(
-    env: &Env,
-    user: &Address,
-    available: &Vec<u32>,
-) -> Vec<u32> {
+pub fn suggest_diversification(env: &Env, user: &Address, available: &Vec<u32>) -> Vec<u32> {
     let positions = risk::get_user_positions(env, user);
     let holding_keys = positions.keys();
 
@@ -431,10 +427,9 @@ mod tests {
     fn seed_prices(env: &Env, asset_id: u32, prices: &[i128]) {
         use crate::risk::RiskDataKey;
         for (i, &p) in prices.iter().enumerate() {
-            env.storage().persistent().set(
-                &RiskDataKey::AssetPriceHistory(asset_id, i as u32),
-                &p,
-            );
+            env.storage()
+                .persistent()
+                .set(&RiskDataKey::AssetPriceHistory(asset_id, i as u32), &p);
         }
         env.storage().persistent().set(
             &RiskDataKey::AssetPriceHistoryCount(asset_id),

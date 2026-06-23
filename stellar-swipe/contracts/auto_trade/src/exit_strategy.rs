@@ -132,8 +132,7 @@ pub fn check_and_execute_exits(
     for i in 0..tp_len {
         let tp = strategy.take_profit_tiers.get(i).unwrap();
         if !tp.executed && current_price >= tp.price && strategy.current_position_size > 0 {
-            let close_amount =
-                (strategy.current_position_size * tp.position_pct as i128) / 10_000;
+            let close_amount = (strategy.current_position_size * tp.position_pct as i128) / 10_000;
             let close_amount = close_amount.max(1);
 
             let trade_id = execute_sell(
@@ -154,11 +153,7 @@ pub fn check_and_execute_exits(
 
             #[allow(deprecated)]
             env.events().publish(
-                (
-                    Symbol::new(env, "tp_hit"),
-                    strategy_id,
-                    tp.price,
-                ),
+                (Symbol::new(env, "tp_hit"), strategy_id, tp.price),
                 (close_amount, strategy.current_position_size),
             );
         }

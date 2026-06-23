@@ -104,10 +104,13 @@ fn test_complete_user_journey() {
 
     // Step S3: Fee preview — verify fee math before any trade
     let breakdown = registry.calculate_fee_preview(&1_000_000i128).unwrap();
-    assert_eq!(breakdown.total_fee, 1_000i128);           // 0.1%
-    assert_eq!(breakdown.platform_fee, 700i128);          // 70%
-    assert_eq!(breakdown.provider_fee, 300i128);          // 30%
-    assert_eq!(breakdown.platform_fee + breakdown.provider_fee, breakdown.total_fee);
+    assert_eq!(breakdown.total_fee, 1_000i128); // 0.1%
+    assert_eq!(breakdown.platform_fee, 700i128); // 70%
+    assert_eq!(breakdown.provider_fee, 300i128); // 30%
+    assert_eq!(
+        breakdown.platform_fee + breakdown.provider_fee,
+        breakdown.total_fee
+    );
 
     // ─────────────────────────────────────────────────────────────────────────
     // ALEX'S JOURNEY
@@ -141,7 +144,10 @@ fn test_complete_user_journey() {
 
     let perf = registry.get_signal_performance(&signal_id).unwrap();
     assert_eq!(perf.executions, 1u32);
-    assert!(perf.average_roi > 0i128, "profitable trade must have positive ROI");
+    assert!(
+        perf.average_roi > 0i128,
+        "profitable trade must have positive ROI"
+    );
     assert_eq!(perf.total_volume, 10_000_000i128);
 
     // Step A4: Stop-loss triggers — second trade at a loss (-15%)
@@ -151,7 +157,7 @@ fn test_complete_user_journey() {
             &alex,
             &signal_id,
             &1_000_000i128,
-            &850_000i128,   // exit (-15%) — stop-loss
+            &850_000i128, // exit (-15%) — stop-loss
             &10_000_000i128,
         )
         .unwrap();
@@ -170,11 +176,7 @@ fn test_complete_user_journey() {
     env.ledger().set_timestamp(expiry + 1);
 
     let outcome_result = env.as_contract(&executor_id, || {
-        registry.record_signal_outcome(
-            &executor_id,
-            &signal_id,
-            &SignalOutcome::Profit,
-        )
+        registry.record_signal_outcome(&executor_id, &signal_id, &SignalOutcome::Profit)
     });
 
     match outcome_result {

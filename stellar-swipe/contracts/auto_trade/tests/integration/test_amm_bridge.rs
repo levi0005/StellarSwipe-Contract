@@ -2,11 +2,11 @@
 
 extern crate std;
 
+use auto_trade::amm_bridge;
 use auto_trade::amm_bridge::mock_router::{MockAmmRouter, MockAmmRouterClient};
+use auto_trade::smart_routing;
 use auto_trade::smart_routing::{LiquidityVenue, VenueLiquidity};
 use auto_trade::{AutoTradeContract, Signal};
-use auto_trade::amm_bridge;
-use auto_trade::smart_routing;
 use soroban_sdk::testutils::Ledger;
 use soroban_sdk::{symbol_short, Address, Env};
 use stellar_swipe_common::amm_bridge::{AmmSourceConfig, AmmSourceKind};
@@ -20,12 +20,7 @@ fn signal(id: u64) -> Signal {
     }
 }
 
-fn venue(
-    venue: LiquidityVenue,
-    venue_id: u32,
-    available: i128,
-    price: i128,
-) -> VenueLiquidity {
+fn venue(venue: LiquidityVenue, venue_id: u32, available: i128, price: i128) -> VenueLiquidity {
     VenueLiquidity {
         venue,
         venue_id,
@@ -85,7 +80,10 @@ fn router_quote_merged_into_discovery() {
             },
         )
         .unwrap();
-        assert_eq!(amm_bridge::discover_quotes(&env, signal_id, 10_000).len(), 1);
+        assert_eq!(
+            amm_bridge::discover_quotes(&env, signal_id, 10_000).len(),
+            1
+        );
     });
 }
 
@@ -122,12 +120,8 @@ fn slippage_protection_rejects_bad_plan() {
     let contract = env.register(AutoTradeContract, ());
 
     env.as_contract(&contract, || {
-        smart_routing::upsert_venue_liquidity(
-            &env,
-            1,
-            venue(LiquidityVenue::Sdex, 1, 100, 500),
-        )
-        .unwrap();
+        smart_routing::upsert_venue_liquidity(&env, 1, venue(LiquidityVenue::Sdex, 1, 100, 500))
+            .unwrap();
         assert!(amm_bridge::plan_amm_route(&env, &signal(1), 100, 50).is_err());
     });
 }

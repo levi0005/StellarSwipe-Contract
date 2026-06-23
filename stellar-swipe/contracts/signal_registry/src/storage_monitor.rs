@@ -9,8 +9,8 @@ use soroban_sdk::{Address, Env, Map};
 
 use crate::events::emit_storage_capacity_warning;
 use crate::expiry::archive_old_signals;
-use crate::types::{ProviderPerformance, Signal};
 use crate::stake::StakeInfo;
+use crate::types::{ProviderPerformance, Signal};
 use crate::StorageKey;
 
 /// Default entry-count limit for instance storage (conservative for 64 KB cap).

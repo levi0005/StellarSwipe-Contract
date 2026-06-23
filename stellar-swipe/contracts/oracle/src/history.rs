@@ -1,8 +1,8 @@
 //! Historical price storage and TWAP calculation
 
 use crate::errors::OracleError;
-use stellar_swipe_common::AssetPair;
 use soroban_sdk::Env;
+use stellar_swipe_common::AssetPair;
 
 const BUCKET_SIZE: u64 = 300; // 5 minutes
 const MAX_BUCKETS: u64 = 2016; // 7 days at 5-min intervals
@@ -93,8 +93,11 @@ pub fn get_twap_deviation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Address, Env, String,
+    };
     use stellar_swipe_common::Asset;
-    use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
 
     fn test_pair(env: &Env) -> AssetPair {
         AssetPair {

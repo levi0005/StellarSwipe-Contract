@@ -121,12 +121,7 @@ fn submit_spam_limit_enforced() {
     let (env, admin, client) = setup();
     // Set a tight rate limit: max 2 signal submissions per window.
     use stellar_swipe_common::rate_limit::{ActionType, RateLimitConfig};
-    client.set_rate_limit_config(
-        &admin,
-        &ActionType::SignalSubmission,
-        &60u64,
-        &2u32,
-    );
+    client.set_rate_limit_config(&admin, &ActionType::SignalSubmission, &60u64, &2u32);
 
     let provider = Address::generate(&env);
     let expiry = env.ledger().timestamp() + 86_400;
@@ -216,7 +211,10 @@ fn expire_past_expiry_marks_expired_and_emits_event() {
     let events_after = env.events().all().len();
 
     // Status transitioned.
-    assert_eq!(client.get_signal(&id).unwrap().status, SignalStatus::Expired);
+    assert_eq!(
+        client.get_signal(&id).unwrap().status,
+        SignalStatus::Expired
+    );
     // At least one event was emitted (signal_expired).
     assert!(events_after > events_before, "expiry event must be emitted");
 }
@@ -331,11 +329,17 @@ fn expired_signal_not_re_expired() {
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 200);
     client.cleanup_expired_signals(&10);
-    assert_eq!(client.get_signal(&id).unwrap().status, SignalStatus::Expired);
+    assert_eq!(
+        client.get_signal(&id).unwrap().status,
+        SignalStatus::Expired
+    );
 
     // Second cleanup — status must remain Expired, not change.
     client.cleanup_expired_signals(&10);
-    assert_eq!(client.get_signal(&id).unwrap().status, SignalStatus::Expired);
+    assert_eq!(
+        client.get_signal(&id).unwrap().status,
+        SignalStatus::Expired
+    );
 }
 
 /// IDs are monotonically increasing — each new signal gets a unique, larger ID.
