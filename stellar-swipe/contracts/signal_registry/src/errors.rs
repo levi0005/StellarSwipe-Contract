@@ -26,8 +26,16 @@ pub enum AdminError {
     CircuitBreakerTriggered = 21,
     StakeBelowMinimum = 22,
     PendingAdminNotFound = 23,
-    PendingAdminExpired = 23,
-    ReentrancyDetected = 24,
+    PendingAdminExpired = 24,
+    ReentrancyDetected = 25,
+    RequiresMultisigApproval = 26,
+    ProposalNotFound = 27,
+    AlreadyApproved = 28,
+    ProposalNotApproved = 29,
+    TimelockNotElapsed = 30,
+    ProposalAlreadyExecuted = 31,
+    ProposalCancelled = 32,
+    TooManyProposals = 33,
 }
 
 #[contracterror]

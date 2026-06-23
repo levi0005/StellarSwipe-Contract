@@ -23,3 +23,7 @@ path = "tests/integration/test_contract_upgrade.rs"
 [[test]]
 name = "test_complete_user_journey"
 path = "tests/integration/test_complete_user_journey.rs"
+
+[[test]]
+name = "test_multisig_governance"
+path = "tests/integration/test_multisig_governance.rs"
