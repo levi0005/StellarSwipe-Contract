@@ -240,11 +240,7 @@ impl StakeVaultContract {
         emit_provider_tier_change(&env, &staker, old_tier, new_tier, new_balance);
 
         // Transfer tokens into the vault (after state update — CEI pattern).
-        token::Client::new(&env, &token).transfer(
-            &staker,
-            env.current_contract_address(),
-            &amount,
-        );
+        token::Client::new(&env, &token).transfer(&staker, env.current_contract_address(), &amount);
 
         Ok(())
     }
