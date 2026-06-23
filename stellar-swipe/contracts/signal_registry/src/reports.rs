@@ -124,7 +124,7 @@ mod tests {
             rationale: String::from_str(env, "Test"),
             timestamp,
             expiry: timestamp + 86_400,
-            status,
+            status: status.clone(),
             executions: 1,
             successful_executions: if status == SignalStatus::Successful {
                 1

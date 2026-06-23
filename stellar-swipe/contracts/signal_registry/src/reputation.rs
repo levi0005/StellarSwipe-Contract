@@ -455,6 +455,7 @@ mod tests {
             success_rate: 6667, // 66.67%
             avg_return: 500,
             total_volume: 1000000,
+            follower_count: 0,
         };
 
         let score_details = calculate_trust_score(&env, &provider, &performance, &None);

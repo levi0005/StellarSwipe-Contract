@@ -647,8 +647,7 @@ impl GovernanceContract {
     /// Check the current staleness level for a user.
     pub fn check_reputation_staleness(env: Env, user: Address) -> StalenessLevel {
         let rep = get_governance_reputation(&env, user);
-        rep.staleness_override
-            .unwrap_or_else(|| detect_staleness(&env, rep.last_activity))
+        resolve_staleness(&env, &rep)
     }
 
     /// # Summary

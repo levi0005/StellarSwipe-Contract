@@ -1155,7 +1155,7 @@ fn test_audit_balances_no_mismatch() {
     let (token, _contract_id, client) = setup_audit(&env, 1_000i128);
 
     let tokens = soroban_sdk::vec![&env, token.clone()];
-    let mismatches = client.audit_balances(&tokens).unwrap();
+    let mismatches = client.audit_balances(&tokens);
 
     // Stored balance equals on-chain balance: no mismatches
     assert_eq!(mismatches.len(), 0);
@@ -1172,7 +1172,7 @@ fn test_audit_balances_detects_surplus() {
     StellarAssetClient::new(&env, &token).mint(&contract_id, &500i128);
 
     let tokens = soroban_sdk::vec![&env, token.clone()];
-    let mismatches = client.audit_balances(&tokens).unwrap();
+    let mismatches = client.audit_balances(&tokens);
 
     assert_eq!(mismatches.len(), 1);
     let m = mismatches.get(0).unwrap();
@@ -1195,7 +1195,7 @@ fn test_audit_balances_detects_deficit() {
     });
 
     let tokens = soroban_sdk::vec![&env, token.clone()];
-    let mismatches = client.audit_balances(&tokens).unwrap();
+    let mismatches = client.audit_balances(&tokens);
 
     assert_eq!(mismatches.len(), 1);
     let m = mismatches.get(0).unwrap();
@@ -1233,7 +1233,7 @@ fn test_audit_balances_multiple_tokens() {
     });
 
     let tokens = soroban_sdk::vec![&env, token_a.clone(), token_b.clone()];
-    let mismatches = client.audit_balances(&tokens).unwrap();
+    let mismatches = client.audit_balances(&tokens);
 
     // Only token B should appear
     assert_eq!(mismatches.len(), 1);

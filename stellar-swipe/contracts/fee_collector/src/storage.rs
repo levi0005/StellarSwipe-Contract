@@ -106,7 +106,7 @@ pub struct MonthlyTradeVolume {
 /// Describes a discrepancy between the contract's stored treasury balance
 /// and the actual on-chain token balance for a given token.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BalanceMismatch {
     /// The token whose balances were compared.
     pub token: Address,

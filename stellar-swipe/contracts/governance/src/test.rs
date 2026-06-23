@@ -10,11 +10,11 @@ use crate::proposals::{
 use crate::{
     Authority, CommitteeAction, CommitteeElectionStatus, CrossCommitteeStatus, DecisionStatus,
     EmergencyActionAuthority, EmergencyActionPayload, GovernanceContract, GovernanceContractClient,
-    GovernanceError, ParameterAdjustmentAuthority, RewardConfigUpdateAction, TreasurySpendAction,
-    TreasurySpendAuthority, VoteType,
+    GovernanceError, ParameterAdjustmentAuthority, ReputationConfig, ReputationTier,
+    RewardConfigUpdateAction, StalenessLevel, TreasurySpendAction, TreasurySpendAuthority, VoteType,
 };
-use soroban_sdk::testutils::{Address as _, Ledger};
-use soroban_sdk::{Address, Bytes, Env, Map, String, Vec};
+use soroban_sdk::testutils::{Address as _, Events, Ledger};
+use soroban_sdk::{symbol_short, Address, Bytes, Env, Map, String, Vec};
 use stellar_swipe_common::Asset;
 
 const SUPPLY: i128 = 1_000_000_000;
@@ -1132,7 +1132,7 @@ fn reputation_tier_computed_correctly_from_participation() {
         let _pid = client.create_proposal(
             &user,
             &ProposalType::ParameterChange(String::from_str(&env, "test_param"), 1000, 1100),
-            &String::from_str(&env, &format!("Proposal {}", i)),
+            &String::from_str(&env, "Proposal"),
             &String::from_str(&env, "desc"),
             &Bytes::new(&env),
         );
@@ -1274,7 +1274,7 @@ fn refresh_stale_reputation_recalculates_score() {
     let fresh_score = client.refresh_reputation(&user);
     let rep = client.governance_reputation(&user);
     assert_eq!(fresh_score, rep.reputation_score);
-    assert_eq!(rep.staleness_override, None);
+    assert_eq!(rep.staleness_override, StalenessLevel::Auto);
 }
 
 #[test]
@@ -2070,8 +2070,7 @@ fn conviction_calibration_admin_can_set_config() {
         reward_bonus_pct: 10,
         max_conviction_cap: 50_000,
     };
-    let result = client.set_conviction_calibration(&admin, &config);
-    assert!(result.is_ok());
+    client.set_conviction_calibration(&admin, &config);
 
     let stored = client.conviction_calibration();
     assert_eq!(stored.penalty_threshold_days, 7);
@@ -2334,7 +2333,7 @@ fn voting_power_uses_snapshot_not_live_balance() {
 
     // late_staker stakes AFTER proposal creation — should not gain voting power on this proposal
     client.stake(&late_staker, &50_000_000i128);
-    assert_eq!(client.staked_balance(&late_staker).unwrap(), 50_000_000);
+    assert_eq!(client.staked_balance(&late_staker), 50_000_000);
 
     // Advance into the voting window
     env.ledger().set_timestamp(70);
@@ -2345,7 +2344,7 @@ fn voting_power_uses_snapshot_not_live_balance() {
         &recipients.community_rewards,
         &GovernanceVoteType::For,
     );
-    let proposal = client.proposal(&proposal_id).unwrap();
+    let proposal = client.proposal(&proposal_id);
     assert_eq!(proposal.votes_for, 120_000_000);
 
     // late_staker had 0 power at snapshot time — must be rejected with NoVotingPower

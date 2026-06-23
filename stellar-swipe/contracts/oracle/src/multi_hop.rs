@@ -319,7 +319,7 @@ mod tests {
         let c = create_asset(&env, "C");
         let d = create_asset(&env, "D");
 
-        let graph = vec![
+        let graph = soroban_sdk::vec![
             &env,
             AssetPair {
                 base: a.clone(),
