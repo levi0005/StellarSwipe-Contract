@@ -162,6 +162,7 @@ dependencies = [
 name = "auto_trade"
 version = "0.0.0"
 dependencies = [
+ "shared",
  "soroban-sdk",
  "stellar_swipe_common",
 ]

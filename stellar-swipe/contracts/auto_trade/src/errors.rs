@@ -23,62 +23,58 @@ pub enum AutoTradeError {
     InsufficientPriceHistory = 12,
     RankingDisabled = 13,
     RateLimited = 14,
-    PrivacyModeEnabled = 10,
-    TradingPaused = 10,
-    StrategyNotFound = 11,
-    PositionAlreadyExists = 12,
+    PrivacyModeEnabled = 15,
+    TradingPaused = 16,
     // ── Portfolio / stat-arb ─────────────────────────────────────────────────
-    InvalidBasketSize = 13,
-    InsufficientPriceHistory = 14,
-    InvalidPriceData = 15,
-    NonCointegratedBasket = 16,
-    ActivePortfolioExists = 17,
-    NoActivePortfolio = 18,
-    NoTradeSignal = 19,
-    InvalidStatArbConfig = 20,
+    InvalidBasketSize = 17,
+    InvalidPriceData = 18,
+    NonCointegratedBasket = 19,
+    ActivePortfolioExists = 20,
+    NoActivePortfolio = 21,
+    NoTradeSignal = 22,
+    InvalidStatArbConfig = 23,
     // ── Exit / insurance ─────────────────────────────────────────────────────
-    ExitStrategyNotFound = 21,
-    InvalidExitConfig = 22,
-    InsuranceNotConfigured = 23,
-    InvalidInsuranceConfig = 24,
+    ExitStrategyNotFound = 24,
+    InvalidExitConfig = 25,
+    InsuranceNotConfigured = 26,
+    InvalidInsuranceConfig = 27,
     // ── Referral (SelfReferral / AlreadySet / Circular / LimitExceeded) ──────
-    ReferralError = 25,
+    ReferralError = 28,
     // ── TWAP (InvalidDuration / NotFound / NotOwner / NotActive) ─────────────
-    TWAPError = 26,
+    TWAPError = 29,
     // ── Correlation ──────────────────────────────────────────────────────────
-    CorrelationLimitExceeded = 27,
-    TooManyCorrelatedPositions = 28,
+    CorrelationLimitExceeded = 30,
+    TooManyCorrelatedPositions = 31,
     // ── Conditional orders (NotFound / NotPending / NotTriggered / Config) ───
-    ConditionalOrderError = 29,
-    InvalidConditionalConfig = 30,
+    ConditionalOrderError = 32,
+    InvalidConditionalConfig = 33,
     // ── Rate limits (all sub-types collapsed) ────────────────────────────────
-    RateLimitExceeded = 31,
+    RateLimitExceeded = 34,
     // ── Pairs trading ────────────────────────────────────────────────────────
-    PairsStrategyNotFound = 32,
-    PairsPositionError = 33,
-    InsufficientCorrelation = 34,
-    PairNotCointegrated = 35,
-    InvalidPairsConfig = 36,
+    PairsStrategyNotFound = 35,
+    PairsPositionError = 36,
+    InsufficientCorrelation = 37,
+    PairNotCointegrated = 38,
+    InvalidPairsConfig = 39,
     // ── Oracle ───────────────────────────────────────────────────────────────
-    OracleUnavailable = 37,
+    OracleUnavailable = 40,
     // ── DCA (NotFound / Inactive / EndTimeReached) ────────────────────────────
-    DcaError = 38,
+    DcaError = 41,
     // ── Mean-reversion (NotFound / InsufficientHistory / LowVolatility) ──────
-    MrStrategyError = 39,
+    MrStrategyError = 42,
     // ── Admin transfer ───────────────────────────────────────────────────────
-    AdminTransferError = 40,
+    AdminTransferError = 43,
     // ── Routing ──────────────────────────────────────────────────────────────
-    RoutingPlanNotFound = 41,
+    RoutingPlanNotFound = 44,
     // ── Arbitrage ────────────────────────────────────────────────────────────
-    ArbitrageError = 42,
-    FrontRunningRisk = 43,
+    ArbitrageError = 45,
+    FrontRunningRisk = 46,
     // ── System / bridge / recovery ───────────────────────────────────────────
-    SystemError = 44,
-    SlippageExceeded = 45,
+    SystemError = 47,
+    SlippageExceeded = 48,
     // ── Misc ─────────────────────────────────────────────────────────────────
-    RankingDisabled = 46,
-    LastOracleForPair = 47,
-    NotPaused = 48,
+    LastOracleForPair = 49,
+    NotPaused = 50,
 }
 
 // ── Backward-compatible aliases ───────────────────────────────────────────────

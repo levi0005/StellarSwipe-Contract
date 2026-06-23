@@ -181,13 +181,6 @@ fn volatility_from_history(env: &Env, history: &Vec<i128>) -> u32 {
     }
 }
 
-fn get_baseline_volatility(env: &Env, pair: &AssetPair) -> Result<u32, AutoTradeError> {
-    let window = 30u32;
-    let history = get_price_history(env, pair, window);
-    let vol = volatility_from_history(env, &history);
-    Ok(vol.max(1000))
-}
-
 fn get_twap_price_window(env: &Env, pair: &AssetPair, window_minutes: u32) -> Vec<i128> {
     get_price_history(env, pair, window_minutes)
 }
@@ -327,7 +320,7 @@ fn execute_twap_segment(env: &Env, twap: &mut TWAPOrder) -> Result<u64, AutoTrad
 fn get_market_price(env: &Env, pair: &AssetPair) -> Result<i128, AutoTradeError> {
     let history = get_price_history(env, pair, 4);
     if let Some(last_price) = history.get(history.len().saturating_sub(1)) {
-        return Ok(*last_price);
+        return Ok(last_price);
     }
 
     let average = average_price(&history);
@@ -409,20 +402,6 @@ pub fn cancel_twap_order(env: &Env, order_id: u64, user: Address) -> Result<Canc
     );
 
     Ok(summary)
-}
-
-// Dummy functions representing market interactions
-fn get_market_price(_env: &Env, _pair: &AssetPair) -> Result<i128, AutoTradeError> {
-    // In production, this would query a decentralized oracle or DEX liquidity pool
-    Ok(100_000)
-}
-
-fn calculate_volatility(_env: &Env, _pair: &AssetPair, _period: u32) -> Result<u32, AutoTradeError> {
-    Ok(1500)
-}
-
-fn get_baseline_volatility(_env: &Env, _pair: &AssetPair) -> Result<u32, AutoTradeError> {
-    Ok(1000)
 }
 
 #[cfg(test)]

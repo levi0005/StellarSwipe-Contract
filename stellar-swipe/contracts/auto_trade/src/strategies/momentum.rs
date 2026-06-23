@@ -599,7 +599,7 @@ pub fn get_historical_prices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Ledger;
+    use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::Env;
 
     fn setup_test_prices(env: &Env) -> Vec<i128> {

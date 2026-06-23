@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+extern crate std;
+
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -180,11 +182,11 @@ fn test_reinitialize_blocked() {
     client.initialize(&admin);
 
     // Second initialize must panic (already initialized guard)
-    let result = std::panic::catch_unwind(|| {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let env2 = env.clone();
         let client2 = AutoTradeContractClient::new(&env2, &contract_id);
         client2.initialize(&attacker);
-    });
+    }));
     assert!(result.is_err(), "Re-initialization must be blocked");
 }
 

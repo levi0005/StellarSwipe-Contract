@@ -1,6 +1,5 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol};
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 
 mod admin;
@@ -143,30 +142,30 @@ impl AutoTradeContract {
         max_slippage_bps: u32,
     ) -> TradeSimulation {
         if amount <= 0 {
-            return failed_simulation(&env, "invalid_amount");
+            return Self::failed_simulation(&env, "invalid_amount");
         }
 
         let signal = match storage::get_signal(&env, signal_id) {
             Some(signal) => signal,
-            None => return failed_simulation(&env, "signal_not_found"),
+            None => return Self::failed_simulation(&env, "signal_not_found"),
         };
 
         if env.ledger().timestamp() > signal.expiry {
-            return failed_simulation(&env, "signal_expired");
+            return Self::failed_simulation(&env, "signal_expired");
         }
 
         if !auth::is_authorized(&env, &user, amount) {
-            return failed_simulation(&env, "unauthorized");
+            return Self::failed_simulation(&env, "unauthorized");
         }
 
         if !sdex::has_sufficient_balance(&env, &user, &signal.base_asset, amount) {
-            return failed_simulation(&env, "insufficient_balance");
+            return Self::failed_simulation(&env, "insufficient_balance");
         }
 
         let current_price = sdex::get_current_price(&env, &signal);
         let available_liquidity = sdex::get_available_liquidity(&env, &signal, amount);
         if available_liquidity <= 0 {
-            return failed_simulation(&env, "insufficient_liquidity");
+            return Self::failed_simulation(&env, "insufficient_liquidity");
         }
 
         let expected_output = core::cmp::min(amount, available_liquidity);
@@ -189,6 +188,16 @@ impl AutoTradeContract {
         } else {
             None
         };
+
+        if let Some(ref reason) = failure_reason {
+            logging::emit_log(
+                &env,
+                logging::LogLevel::Warn,
+                String::from_str(&env, "simulation"),
+                reason.clone(),
+                None,
+            );
+        }
 
         TradeSimulation {
             expected_output,
@@ -414,6 +423,17 @@ impl AutoTradeContract {
         logging::emit_log(&env, level, category, message, correlation_id);
     }
 
+    /// Get running trade-outcome counters (attempts / filled / partially
+    /// filled / failed) for a cheap on-chain success-rate signal.
+    pub fn get_trade_metrics(env: Env) -> logging::TradeMetrics {
+        logging::get_trade_metrics(&env)
+    }
+
+    /// Get the most recent structured log entries (oldest first, capped at 20).
+    pub fn get_recent_logs(env: Env) -> soroban_sdk::Vec<logging::LogEntry> {
+        logging::get_recent_logs(&env)
+    }
+
     /// Submit a KYC verification request for a user.
     pub fn submit_kyc_verification(
         env: Env,
@@ -497,6 +517,13 @@ impl AutoTradeContract {
         amount: i128,
     ) -> Result<TradeResult, AutoTradeError> {
         if admin::is_paused(&env, String::from_str(&env, CAT_TRADING)) {
+            logging::emit_log(
+                &env,
+                logging::LogLevel::Warn,
+                String::from_str(&env, "trade"),
+                String::from_str(&env, "execute_trade_blocked"),
+                None,
+            );
             return Err(AutoTradeError::TradingPaused);
         }
 
@@ -509,7 +536,16 @@ impl AutoTradeContract {
         );
 
         // Oracle circuit breaker: halt if oracle is unavailable (unless admin override)
-        oracle::check_oracle_circuit_breaker(&env, signal_id as u32)?;
+        if let Err(err) = oracle::check_oracle_circuit_breaker(&env, signal_id as u32) {
+            logging::emit_log(
+                &env,
+                logging::LogLevel::Warn,
+                String::from_str(&env, "trade"),
+                String::from_str(&env, "execute_trade_blocked"),
+                None,
+            );
+            return Err(err);
+        }
 
         if amount <= 0 {
             return Err(AutoTradeError::InvalidAmount);
@@ -591,6 +627,8 @@ impl AutoTradeContract {
         } else {
             TradeStatus::Filled
         };
+
+        logging::record_trade_outcome(&env, &status);
 
         admin::update_cb_stats(
             &env,
@@ -829,6 +867,8 @@ impl AutoTradeContract {
         user_b: Address,
     ) -> Result<portfolio::PortfolioComparison, AutoTradeError> {
         portfolio::compare_portfolios(&env, user_a, user_b)
+    }
+
     /// Set risk parity configuration
     pub fn set_risk_parity_config(
         env: Env,
@@ -1007,6 +1047,13 @@ impl AutoTradeContract {
     }
 
 fn failed_simulation(env: &Env, reason: &str) -> TradeSimulation {
+    logging::emit_log(
+        env,
+        logging::LogLevel::Warn,
+        String::from_str(env, "simulation"),
+        String::from_str(env, reason),
+        None,
+    );
     TradeSimulation {
         expected_output: 0,
         fee_amount: 0,
@@ -1017,7 +1064,6 @@ fn failed_simulation(env: &Env, reason: &str) -> TradeSimulation {
     }
 }
 
-mod test;
     /// Returns estimated storage usage metrics.
     ///
     /// # Estimation methodology
