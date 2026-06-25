@@ -7,6 +7,44 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Env, Symbol,
 };
 
+// ── Slash severity tiers ──────────────────────────────────────────────────────
+
+/// Severity tier for a slashing event.
+/// Controls what fraction of stake is burned.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SlashSeverity {
+    Minor = 0,
+    Major = 1,
+    Critical = 2,
+}
+
+/// On-chain configuration for how much stake each tier slashes.
+/// Values are in basis points (10_000 = 100 %).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SlashTierConfig {
+    /// Basis points slashed for a Minor violation.
+    pub minor_bps: u32,
+    /// Basis points slashed for a Major violation.
+    pub major_bps: u32,
+    /// Basis points slashed for a Critical violation (typically 10_000 = full stake).
+    pub critical_bps: u32,
+}
+
+impl SlashTierConfig {
+    pub const fn default_config() -> Self {
+        Self {
+            minor_bps: 500,    // 5 %
+            major_bps: 3_000,  // 30 %
+            critical_bps: 10_000, // 100 %
+        }
+    }
+}
+
+const BPS_DENOMINATOR: i128 = 10_000;
+
 /// Temporary-storage key for the reentrancy lock on `withdraw_stake`.
 const EXECUTION_LOCK: &str = "WithdrawLock";
 
@@ -78,6 +116,8 @@ pub enum StorageKey {
     /// Ledger sequence at which a stake was last deposited (per staker).
     /// Used to detect same-ledger stake+unstake flash loan patterns.
     LastStakeLedger(Address),
+    /// Admin-configurable slashing tier percentages.
+    SlashTierConfig,
 }
 
 #[contracterror]
@@ -99,6 +139,8 @@ pub enum StakeVaultError {
     TimelockNotElapsed = 9,
     /// Stake and unstake in the same ledger — flash loan pattern detected.
     FlashLoanDetected = 10,
+    /// Slash tier percentage would exceed 100% of stake.
+    InvalidSlashTier = 11,
 }
 
 #[contract]
@@ -494,13 +536,54 @@ impl StakeVaultContract {
 
     // ── Slash ──────────────────────────────────────────────────────────────────
 
+    /// Admin: configure the slash percentage for each severity tier (in basis points).
+    /// `minor_bps`, `major_bps`, `critical_bps` must all be <= 10_000.
+    pub fn configure_slash_tiers(
+        env: Env,
+        minor_bps: u32,
+        major_bps: u32,
+        critical_bps: u32,
+    ) -> Result<(), StakeVaultError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(StakeVaultError::NotInitialized)?;
+        admin.require_auth();
+        if minor_bps > 10_000 || major_bps > 10_000 || critical_bps > 10_000 {
+            return Err(StakeVaultError::InvalidSlashTier);
+        }
+        let cfg = SlashTierConfig { minor_bps, major_bps, critical_bps };
+        env.storage()
+            .instance()
+            .set(&StorageKey::SlashTierConfig, &cfg);
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "stake_vault"), Symbol::new(&env, "slash_tiers_updated")),
+            (minor_bps, major_bps, critical_bps),
+        );
+        Ok(())
+    }
+
+    pub fn get_slash_tier_config(env: Env) -> SlashTierConfig {
+        env.storage()
+            .instance()
+            .get(&StorageKey::SlashTierConfig)
+            .unwrap_or_else(SlashTierConfig::default_config)
+    }
+
+    /// Slash `provider`'s stake according to `severity`.
+    ///
+    /// The slashed amount is computed from the configured tier percentages
+    /// (default: minor=5%, major=30%, critical=100%).  Only the signal registry
+    /// may call this.
     pub fn slash_stake(
         env: Env,
         caller: Address,
         provider: Address,
-        amount: i128,
+        severity: SlashSeverity,
         reason: Symbol,
-    ) -> Result<(), StakeVaultError> {
+    ) -> Result<i128, StakeVaultError> {
         caller.require_auth();
         let signal_registry: Address = env
             .storage()
@@ -517,6 +600,18 @@ impl StakeVaultContract {
             .get(&StorageKey::StakeToken)
             .ok_or(StakeVaultError::NotInitialized)?;
 
+        let cfg: SlashTierConfig = env
+            .storage()
+            .instance()
+            .get(&StorageKey::SlashTierConfig)
+            .unwrap_or_else(SlashTierConfig::default_config);
+
+        let tier_bps = match severity {
+            SlashSeverity::Minor    => cfg.minor_bps as i128,
+            SlashSeverity::Major    => cfg.major_bps as i128,
+            SlashSeverity::Critical => cfg.critical_bps as i128,
+        };
+
         let mut stakes: soroban_sdk::Map<Address, StakeInfoV2> = env
             .storage()
             .persistent()
@@ -527,32 +622,34 @@ impl StakeVaultContract {
             .get(provider.clone())
             .ok_or(StakeVaultError::NoStake)?;
 
-        if amount <= 0 || amount > info.balance {
+        if info.balance == 0 {
             return Err(StakeVaultError::NoStake);
         }
 
-        info.balance = info
-            .balance
-            .checked_sub(amount)
-            .ok_or(StakeVaultError::NoStake)?;
+        // Compute slash amount from tier percentage; min 1 stroop.
+        let slash_amount = core::cmp::max(
+            (info.balance * tier_bps) / BPS_DENOMINATOR,
+            1,
+        );
+        let slash_amount = core::cmp::min(slash_amount, info.balance);
+
+        info.balance = info.balance.saturating_sub(slash_amount);
         info.last_updated = env.ledger().timestamp();
         stakes.set(provider.clone(), info);
         env.storage()
             .persistent()
             .set(&MigrationKey::StakesV2, &stakes);
 
+        // Event records severity tier and resulting slash amount for audit.
         #[allow(deprecated)]
         env.events().publish(
-            (
-                Symbol::new(&env, "stake_vault"),
-                Symbol::new(&env, "stake_slashed"),
-            ),
-            (provider.clone(), amount, reason),
+            (Symbol::new(&env, "stake_vault"), Symbol::new(&env, "stake_slashed")),
+            (provider.clone(), severity as u32, slash_amount, reason),
         );
 
-        token::Client::new(&env, &token).burn(&env.current_contract_address(), &amount);
+        token::Client::new(&env, &token).burn(&env.current_contract_address(), &slash_amount);
 
-        Ok(())
+        Ok(slash_amount)
     }
 
     // ── Read ───────────────────────────────────────────────────────────────────

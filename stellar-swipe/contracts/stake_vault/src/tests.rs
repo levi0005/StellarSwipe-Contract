@@ -737,3 +737,123 @@ fn timelock_request_consumed_after_withdrawal() {
         Err(Ok(StakeVaultError::TimelockRequired))
     );
 }
+
+// ── #612 Severity-tiered slashing tests ──────────────────────────────────────
+
+#[cfg(test)]
+mod slash_severity_tests {
+    use crate::{
+        migration::{MigrationKey, StakeInfoV2},
+        SlashSeverity, SlashTierConfig, StakeVaultContract, StakeVaultContractClient,
+        StakeVaultError,
+    };
+    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Map, Symbol};
+
+    fn sac_token(env: &Env, admin: &Address) -> Address {
+        env.register_stellar_asset_contract_v2(admin.clone()).address()
+    }
+
+    fn seed(env: &Env, contract_id: &Address, staker: &Address, balance: i128) {
+        env.as_contract(contract_id, || {
+            let mut stakes: Map<Address, StakeInfoV2> = env
+                .storage()
+                .persistent()
+                .get(&MigrationKey::StakesV2)
+                .unwrap_or_else(|| Map::new(env));
+            stakes.set(staker.clone(), StakeInfoV2 { balance, locked_until: 0, last_updated: 0 });
+            env.storage().persistent().set(&MigrationKey::StakesV2, &stakes);
+        });
+    }
+
+    fn setup() -> (Env, Address, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let registry = Address::generate(&env);
+        let token = sac_token(&env, &admin);
+        let vault_id = env.register(StakeVaultContract, ());
+        StakeVaultContractClient::new(&env, &vault_id).initialize(&admin, &token, &registry);
+        (env, vault_id, token, admin, registry)
+    }
+
+    #[test]
+    fn minor_slash_burns_default_5_percent() {
+        let (env, vault_id, token, _admin, registry) = setup();
+        let provider = Address::generate(&env);
+        let balance: i128 = 1_000_000;
+        StellarAssetClient::new(&env, &token).mint(&vault_id, &balance);
+        seed(&env, &vault_id, &provider, balance);
+
+        let client = StakeVaultContractClient::new(&env, &vault_id);
+        let slashed = client.slash_stake(&registry, &provider, &SlashSeverity::Minor, &Symbol::new(&env, "bad"));
+        assert_eq!(slashed, 50_000); // 5% of 1_000_000
+        assert_eq!(client.get_stake(&provider), 950_000);
+    }
+
+    #[test]
+    fn major_slash_burns_default_30_percent() {
+        let (env, vault_id, token, _admin, registry) = setup();
+        let provider = Address::generate(&env);
+        let balance: i128 = 1_000_000;
+        StellarAssetClient::new(&env, &token).mint(&vault_id, &balance);
+        seed(&env, &vault_id, &provider, balance);
+
+        let client = StakeVaultContractClient::new(&env, &vault_id);
+        let slashed = client.slash_stake(&registry, &provider, &SlashSeverity::Major, &Symbol::new(&env, "fraud"));
+        assert_eq!(slashed, 300_000); // 30%
+        assert_eq!(client.get_stake(&provider), 700_000);
+    }
+
+    #[test]
+    fn critical_slash_burns_full_stake() {
+        let (env, vault_id, token, _admin, registry) = setup();
+        let provider = Address::generate(&env);
+        let balance: i128 = 1_000_000;
+        StellarAssetClient::new(&env, &token).mint(&vault_id, &balance);
+        seed(&env, &vault_id, &provider, balance);
+
+        let client = StakeVaultContractClient::new(&env, &vault_id);
+        let slashed = client.slash_stake(&registry, &provider, &SlashSeverity::Critical, &Symbol::new(&env, "attack"));
+        assert_eq!(slashed, balance);
+        assert_eq!(client.get_stake(&provider), 0);
+    }
+
+    #[test]
+    fn admin_can_reconfigure_tiers() {
+        let (env, vault_id, token, _admin, registry) = setup();
+        let provider = Address::generate(&env);
+        let balance: i128 = 1_000_000;
+        StellarAssetClient::new(&env, &token).mint(&vault_id, &balance);
+        seed(&env, &vault_id, &provider, balance);
+
+        let client = StakeVaultContractClient::new(&env, &vault_id);
+        client.configure_slash_tiers(&100, &2_000, &10_000); // minor = 1%
+        let slashed = client.slash_stake(&registry, &provider, &SlashSeverity::Minor, &Symbol::new(&env, "test"));
+        assert_eq!(slashed, 10_000); // 1%
+    }
+
+    #[test]
+    fn invalid_tier_bps_rejected() {
+        let (env, vault_id, _token, _admin, _registry) = setup();
+        let client = StakeVaultContractClient::new(&env, &vault_id);
+        assert_eq!(
+            client.try_configure_slash_tiers(&500, &3_000, &10_001),
+            Err(Ok(StakeVaultError::InvalidSlashTier))
+        );
+    }
+
+    #[test]
+    fn unauthorized_caller_rejected() {
+        let (env, vault_id, token, _admin, _registry) = setup();
+        let provider = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&vault_id, &1_000);
+        seed(&env, &vault_id, &provider, 1_000);
+
+        let client = StakeVaultContractClient::new(&env, &vault_id);
+        assert_eq!(
+            client.try_slash_stake(&attacker, &provider, &SlashSeverity::Major, &Symbol::new(&env, "x")),
+            Err(Ok(StakeVaultError::Unauthorized))
+        );
+    }
+}

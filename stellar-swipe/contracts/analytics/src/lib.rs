@@ -74,9 +74,41 @@ enum DataKey {
     LastReportTime,
     CurrentSnapshot,
     PreviousSnapshot,
+    /// Maps export_id (u64) -> checksum (u64) for compliance export integrity.
+    ExportChecksum(u64),
+    /// Monotonic counter for export IDs.
+    ExportCounter,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
+
+/// Compute a deterministic checksum over a `ProtocolSnapshot`.
+/// Uses FNV-1a 64-bit hash mixing each field in order.
+fn compute_snapshot_checksum(s: &ProtocolSnapshot) -> u64 {
+    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+    const FNV_PRIME: u64 = 1_099_511_628_211;
+
+    let mut h = FNV_OFFSET;
+    macro_rules! mix {
+        ($v:expr) => {{
+            let bytes = ($v as u64).to_le_bytes();
+            for b in bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(FNV_PRIME);
+            }
+        }};
+    }
+    mix!(s.total_signals);
+    mix!(s.active_signals);
+    mix!(s.total_providers);
+    mix!(s.total_executions);
+    // i128 volume — split into two u64 halves
+    mix!(s.total_volume as u64);
+    mix!((s.total_volume >> 64) as u64);
+    mix!(s.avg_success_rate_bps as u64);
+    mix!(s.timestamp);
+    h
+}
 
 #[contract]
 pub struct AnalyticsContract;
@@ -206,6 +238,59 @@ impl AnalyticsContract {
             .instance()
             .get(&DataKey::LastReportTime)
             .unwrap_or(0)
+    }
+
+    // ── #614 Compliance export with checksum ──────────────────────────────────
+
+    /// Export the current snapshot for compliance, computing and anchoring a
+    /// checksum over the payload.  Returns `(export_id, checksum)`.
+    pub fn export_compliance_report(env: Env) -> (u64, u64) {
+        let snapshot: ProtocolSnapshot = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentSnapshot)
+            .unwrap_or(ProtocolSnapshot {
+                total_signals: 0,
+                active_signals: 0,
+                total_providers: 0,
+                total_executions: 0,
+                total_volume: 0,
+                avg_success_rate_bps: 0,
+                timestamp: 0,
+            });
+
+        let checksum = compute_snapshot_checksum(&snapshot);
+
+        let export_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExportCounter)
+            .unwrap_or(0)
+            + 1;
+        env.storage().instance().set(&DataKey::ExportCounter, &export_id);
+        env.storage().instance().set(&DataKey::ExportChecksum(export_id), &checksum);
+
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "analytics"), Symbol::new(&env, "compliance_export")),
+            (export_id, checksum, snapshot.clone()),
+        );
+
+        (export_id, checksum)
+    }
+
+    /// Verify that `snapshot` matches the on-chain checksum recorded for `export_id`.
+    /// Returns `true` if integrity holds, `false` if the payload was altered.
+    pub fn verify_export_checksum(env: Env, export_id: u64, snapshot: ProtocolSnapshot) -> bool {
+        let recorded: u64 = match env
+            .storage()
+            .instance()
+            .get(&DataKey::ExportChecksum(export_id))
+        {
+            Some(v) => v,
+            None => return false,
+        };
+        compute_snapshot_checksum(&snapshot) == recorded
     }
 }
 
@@ -402,5 +487,71 @@ mod tests {
         client.initialize(&admin);
         let result = client.try_initialize(&admin);
         assert!(result.is_err(), "double initialize must fail");
+    }
+
+    // ── #614 Export checksum tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_export_checksum_roundtrip_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let id = env.register(AnalyticsContract, ());
+        let client = AnalyticsContractClient::new(&env, &id);
+
+        client.initialize(&admin);
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        client.update_snapshot(&week1_snapshot(1_000_000));
+
+        let (export_id, _checksum) = client.export_compliance_report();
+        assert!(client.verify_export_checksum(&export_id, &week1_snapshot(1_000_000)));
+    }
+
+    #[test]
+    fn test_tampered_export_fails_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let id = env.register(AnalyticsContract, ());
+        let client = AnalyticsContractClient::new(&env, &id);
+
+        client.initialize(&admin);
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        client.update_snapshot(&week1_snapshot(1_000_000));
+
+        let (export_id, _checksum) = client.export_compliance_report();
+
+        // Tamper: use week2 snapshot instead of week1
+        let tampered = week2_snapshot(1_000_000);
+        assert!(!client.verify_export_checksum(&export_id, &tampered));
+    }
+
+    #[test]
+    fn test_export_event_emitted_with_checksum() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let id = env.register(AnalyticsContract, ());
+        let client = AnalyticsContractClient::new(&env, &id);
+
+        client.initialize(&admin);
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        client.update_snapshot(&week1_snapshot(1_000_000));
+        client.export_compliance_report();
+
+        // One export event should have been emitted
+        assert_eq!(env.events().all().len(), 1);
+    }
+
+    #[test]
+    fn test_unknown_export_id_returns_false() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let id = env.register(AnalyticsContract, ());
+        let client = AnalyticsContractClient::new(&env, &id);
+
+        client.initialize(&admin);
+        assert!(!client.verify_export_checksum(&999, &week1_snapshot(0)));
     }
 }

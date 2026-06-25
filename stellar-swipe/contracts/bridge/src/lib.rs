@@ -27,6 +27,9 @@ pub enum BridgeError {
     InsufficientWrappedBalance = 12,
     WithdrawalNotReady = 13,
     InvalidOperation = 14,
+    /// Withdrawal exceeds the dynamic limit derived from available liquidity buffer.
+    /// Distinct from DailyLimitExceeded (static anti-spam) so callers can differentiate.
+    DynamicLiquidityLimitExceeded = 15,
 }
 
 #[contracttype]
@@ -117,6 +120,8 @@ pub enum DataKey {
     UsedSignature(Address, u64, ValidatorApprovalKind, String),
     WrappedBalance(Address, String),
     DailyVolume,
+    /// Admin-set available liquidity buffer for dynamic rate limiting.
+    LiquidityBuffer,
 }
 
 const DAY_SECONDS: u64 = 86_400;
@@ -602,6 +607,31 @@ impl BridgeContract {
     pub fn health_check(env: Env) -> stellar_swipe_common::HealthStatus {
         crate::governance::bridge_health_check(&env)
     }
+
+    // ── #613 Dynamic liquidity rate-limit ──────────────────────────────────────
+
+    /// Admin: record the current available liquidity buffer.
+    /// This is used to compute the dynamic per-transfer withdrawal cap.
+    pub fn update_liquidity_buffer(env: Env, admin: Address, buffer: i128) -> Result<(), BridgeError> {
+        require_admin(&env, &admin)?;
+        if !cfg!(test) {
+            admin.require_auth();
+        }
+        if buffer < 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+        env.storage().persistent().set(&DataKey::LiquidityBuffer, &buffer);
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "bridge"), Symbol::new(&env, "liquidity_buffer_updated")),
+            buffer,
+        );
+        Ok(())
+    }
+
+    pub fn get_liquidity_buffer(env: Env) -> i128 {
+        env.storage().persistent().get(&DataKey::LiquidityBuffer).unwrap_or(i128::MAX)
+    }
 }
 
 fn get_config(env: &Env) -> Result<BridgeConfig, BridgeError> {
@@ -671,6 +701,21 @@ fn validate_amount_and_limits(env: &Env, amount: i128) -> Result<(), BridgeError
 
     if volume.total_amount + amount > config.security.daily_transfer_limit {
         return Err(BridgeError::DailyLimitExceeded);
+    }
+
+    // ── Dynamic liquidity-buffer cap (independent of static limits) ───────────
+    // Allowed single transfer = 10% of current buffer (minimum 1 if buffer > 0).
+    // When buffer is unset (MAX) there is no dynamic restriction.
+    let buffer: i128 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::LiquidityBuffer)
+        .unwrap_or(i128::MAX);
+    if buffer != i128::MAX {
+        let dynamic_limit = core::cmp::max(buffer / 10, 1);
+        if amount > dynamic_limit {
+            return Err(BridgeError::DynamicLiquidityLimitExceeded);
+        }
     }
 
     volume.total_amount += amount;
@@ -960,6 +1005,77 @@ mod test {
                 String::from_str(&env, "stellar:user"),
             );
             assert_eq!(daily, Err(BridgeError::DailyLimitExceeded));
+        });
+    }
+
+    // ── #613 Dynamic liquidity rate-limit tests ────────────────────────────────
+
+    #[test]
+    fn healthy_liquidity_allows_transfers_up_to_10pct() {
+        let (env, contract_id, admin, validators) = setup();
+        let user = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            init(&env, &admin, &validators);
+            // Buffer = 5000; dynamic limit = 500
+            BridgeContract::update_liquidity_buffer(env.clone(), admin.clone(), 5_000).unwrap();
+
+            // 500 is exactly 10% — should pass
+            BridgeContract::initiate_lock_mint(
+                env.clone(), user.clone(),
+                ChainId::Ethereum, ChainId::Polygon,
+                String::from_str(&env, "ETH"), String::from_str(&env, "wETH"),
+                500,
+                String::from_str(&env, "0xa"), 1,
+                String::from_str(&env, "r"),
+            ).unwrap();
+        });
+    }
+
+    #[test]
+    fn low_liquidity_rejects_with_dynamic_limit_error() {
+        let (env, contract_id, admin, validators) = setup();
+        let user = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            init(&env, &admin, &validators);
+            // Buffer = 100; dynamic limit = 10
+            BridgeContract::update_liquidity_buffer(env.clone(), admin.clone(), 100).unwrap();
+
+            let result = BridgeContract::initiate_lock_mint(
+                env.clone(), user.clone(),
+                ChainId::Ethereum, ChainId::Polygon,
+                String::from_str(&env, "ETH"), String::from_str(&env, "wETH"),
+                50,
+                String::from_str(&env, "0xb"), 2,
+                String::from_str(&env, "r"),
+            );
+            assert_eq!(result, Err(BridgeError::DynamicLiquidityLimitExceeded));
+        });
+    }
+
+    #[test]
+    fn dynamic_limit_error_is_distinct_from_daily_limit_error() {
+        // Confirms the error variant is DynamicLiquidityLimitExceeded, not DailyLimitExceeded
+        assert_ne!(
+            BridgeError::DynamicLiquidityLimitExceeded,
+            BridgeError::DailyLimitExceeded,
+        );
+    }
+
+    #[test]
+    fn no_buffer_set_means_no_dynamic_restriction() {
+        let (env, contract_id, admin, validators) = setup();
+        let user = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            init(&env, &admin, &validators);
+            // No buffer update — dynamic limit is effectively infinite
+            BridgeContract::initiate_lock_mint(
+                env.clone(), user,
+                ChainId::Ethereum, ChainId::Polygon,
+                String::from_str(&env, "ETH"), String::from_str(&env, "wETH"),
+                999,
+                String::from_str(&env, "0xc"), 3,
+                String::from_str(&env, "r"),
+            ).unwrap();
         });
     }
 }
