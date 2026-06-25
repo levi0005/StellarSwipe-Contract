@@ -29,4 +29,5 @@ pub enum OracleError {
     PriceStaleTradeBlocked = 22,
     PendingAdminNotFound = 23,
     PendingAdminExpired = 24,
+    InsufficientSources = 25,
 }

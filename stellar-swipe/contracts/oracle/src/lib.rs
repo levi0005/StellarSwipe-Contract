@@ -563,6 +563,16 @@ impl OracleContract {
             return Err(OracleError::StalePrice);
         }
 
+        // 1b. Enforce minimum independent source count
+        let min_count: u32 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::MinSourceCount)
+            .unwrap_or(0);
+        if min_count > 0 && (fresh_prices.len() as u32) < min_count {
+            return Err(OracleError::InsufficientSources);
+        }
+
         // 2. Median Aggregation
         // Sort by price
         let mut sorted = fresh_prices;
@@ -588,6 +598,36 @@ impl OracleContract {
         }
 
         Ok((median_data.price, median_data.confidence))
+    }
+
+    /// Set the minimum number of independent fresh sources required before a
+    /// price is considered valid for risk-sensitive operations.
+    /// Admin only. Emits `min_src_count_updated`.
+    pub fn set_min_source_count(
+        env: Env,
+        admin: Address,
+        min_count: u32,
+    ) -> Result<(), OracleError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let old: u32 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::MinSourceCount)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&StorageKey::MinSourceCount, &min_count);
+        events::emit_min_source_count_updated(&env, old, min_count);
+        Ok(())
+    }
+
+    /// Return the current minimum independent source count (0 = no requirement).
+    pub fn get_min_source_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&StorageKey::MinSourceCount)
+            .unwrap_or(0)
     }
 
     pub fn add_price_source(

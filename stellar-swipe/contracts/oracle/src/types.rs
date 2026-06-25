@@ -44,6 +44,7 @@ pub enum StorageKey {
     OracleWeight(Address),
     PendingAdmin,
     PendingAdminExpiry,
+    MinSourceCount,
 }
 
 #[contracttype]

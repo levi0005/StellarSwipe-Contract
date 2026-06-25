@@ -127,6 +127,103 @@ pub struct RebalanceAction {
     pub target_bps: i128,
 }
 
+/// Per-asset holding in the diversification report.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetAllocation {
+    pub asset: Asset,
+    /// Raw token amount held.
+    pub amount: i128,
+    /// USD-equivalent value (amount × oracle price).
+    pub value_usd: i128,
+    /// Share of total treasury value in basis points (0–10 000).
+    pub concentration_bps: i128,
+}
+
+/// Treasury diversification snapshot returned by `get_treasury_diversification`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryDiversification {
+    /// Holdings broken down by asset (zero-balance assets excluded).
+    pub allocations: Vec<AssetAllocation>,
+    /// Concentration of the single largest holding, in basis points.
+    pub largest_holding_bps: i128,
+    /// Asset code of the largest holding (empty string when treasury is empty).
+    pub largest_asset: Asset,
+    /// Total treasury value in USD-equivalent units.
+    pub total_value_usd: i128,
+}
+
+/// Compute the treasury's balance breakdown and concentration metrics.
+///
+/// `prices` must supply a USD-equivalent price for every asset with a non-zero
+/// balance; assets without a price entry are silently skipped (their value is
+/// treated as zero and they are excluded from the output).
+///
+/// # Errors
+/// - [`GovernanceError::ArithmeticOverflow`] — intermediate multiplication overflowed.
+pub fn get_diversification(
+    env: &Env,
+    treasury: &Treasury,
+    prices: &soroban_sdk::Map<Asset, i128>,
+) -> Result<TreasuryDiversification, GovernanceError> {
+    let mut allocations: Vec<AssetAllocation> = Vec::new(env);
+    let mut total_value_usd = 0i128;
+
+    // First pass: collect non-zero balances and compute total USD value.
+    let mut index = 0;
+    while index < treasury.tracked_assets.len() {
+        let asset = treasury.tracked_assets.get(index).unwrap();
+        let amount = treasury.assets.get(asset.clone()).unwrap_or(0);
+        index += 1;
+
+        if amount <= 0 {
+            continue;
+        }
+        let price = match prices.get(asset.clone()) {
+            Some(p) if p > 0 => p,
+            _ => continue,
+        };
+        let value_usd = checked_mul(amount, price)?;
+        total_value_usd = checked_add(total_value_usd, value_usd)?;
+        allocations.push_back(AssetAllocation {
+            asset,
+            amount,
+            value_usd,
+            concentration_bps: 0, // filled in second pass
+        });
+    }
+
+    // Second pass: compute per-asset concentration and find largest holding.
+    let mut largest_holding_bps = 0i128;
+    let mut largest_asset = Asset {
+        code: soroban_sdk::String::from_str(env, ""),
+        issuer: None,
+    };
+
+    let mut idx = 0;
+    while idx < allocations.len() {
+        let mut alloc = allocations.get(idx).unwrap();
+        if total_value_usd > 0 {
+            alloc.concentration_bps =
+                checked_div(checked_mul(alloc.value_usd, BPS_DENOMINATOR)?, total_value_usd)?;
+        }
+        if alloc.concentration_bps > largest_holding_bps {
+            largest_holding_bps = alloc.concentration_bps;
+            largest_asset = alloc.asset.clone();
+        }
+        allocations.set(idx, alloc);
+        idx += 1;
+    }
+
+    Ok(TreasuryDiversification {
+        allocations,
+        largest_holding_bps,
+        largest_asset,
+        total_value_usd,
+    })
+}
+
 pub fn empty_treasury(env: &Env) -> Treasury {
     Treasury {
         assets: Map::new(env),
@@ -1067,6 +1164,89 @@ mod tests {
             0,
         );
         assert_eq!(result, Err(GovernanceError::BudgetNotFound));
+    }
+
+    // ─── Issue #604: treasury diversification tests ──────────────────────────
+
+    #[test]
+    fn diversification_single_asset_treasury() {
+        let env = Env::default();
+        let mut treasury = empty_treasury(&env);
+        let xlm = sample_asset(&env, "XLM");
+        set_asset_balance(&env, &mut treasury, xlm.clone(), 1_000).unwrap();
+
+        let mut prices = Map::new(&env);
+        prices.set(xlm.clone(), 2);
+
+        let report = get_diversification(&env, &treasury, &prices).unwrap();
+
+        assert_eq!(report.total_value_usd, 2_000);
+        assert_eq!(report.allocations.len(), 1);
+        let alloc = report.allocations.get(0).unwrap();
+        assert_eq!(alloc.asset, xlm);
+        assert_eq!(alloc.amount, 1_000);
+        assert_eq!(alloc.value_usd, 2_000);
+        // single asset = 100% = 10 000 bps
+        assert_eq!(alloc.concentration_bps, BPS_DENOMINATOR);
+        assert_eq!(report.largest_holding_bps, BPS_DENOMINATOR);
+    }
+
+    #[test]
+    fn diversification_multi_asset_correct_concentration() {
+        let env = Env::default();
+        let mut treasury = empty_treasury(&env);
+        let xlm = sample_asset(&env, "XLM");
+        let usdc = sample_asset(&env, "USDC");
+        // XLM: 600 units @ $2 = $1200 (60 %)
+        // USDC: 800 units @ $1 = $800 (40 %)
+        set_asset_balance(&env, &mut treasury, xlm.clone(), 600).unwrap();
+        set_asset_balance(&env, &mut treasury, usdc.clone(), 800).unwrap();
+
+        let mut prices = Map::new(&env);
+        prices.set(xlm.clone(), 2);
+        prices.set(usdc.clone(), 1);
+
+        let report = get_diversification(&env, &treasury, &prices).unwrap();
+
+        assert_eq!(report.total_value_usd, 2_000);
+        assert_eq!(report.allocations.len(), 2);
+
+        // Find each allocation by asset.
+        let mut xlm_bps = 0i128;
+        let mut usdc_bps = 0i128;
+        for i in 0..report.allocations.len() {
+            let a = report.allocations.get(i).unwrap();
+            if a.asset == xlm {
+                xlm_bps = a.concentration_bps;
+            } else {
+                usdc_bps = a.concentration_bps;
+            }
+        }
+        assert_eq!(xlm_bps, 6_000);
+        assert_eq!(usdc_bps, 4_000);
+        assert_eq!(report.largest_holding_bps, 6_000);
+        assert_eq!(report.largest_asset, xlm);
+    }
+
+    #[test]
+    fn diversification_excludes_zero_balance_assets() {
+        let env = Env::default();
+        let mut treasury = empty_treasury(&env);
+        let xlm = sample_asset(&env, "XLM");
+        let usdc = sample_asset(&env, "USDC");
+        set_asset_balance(&env, &mut treasury, xlm.clone(), 500).unwrap();
+        // USDC tracked but zero balance.
+        set_asset_balance(&env, &mut treasury, usdc.clone(), 0).unwrap();
+
+        let mut prices = Map::new(&env);
+        prices.set(xlm.clone(), 1);
+        prices.set(usdc.clone(), 1);
+
+        let report = get_diversification(&env, &treasury, &prices).unwrap();
+
+        // Only XLM should appear.
+        assert_eq!(report.allocations.len(), 1);
+        assert_eq!(report.allocations.get(0).unwrap().asset, xlm);
     }
 
     /// `approve_budget` with a cap larger than the budget's `allocated` fails.

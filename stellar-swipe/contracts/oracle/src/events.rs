@@ -56,6 +56,13 @@ pub fn emit_oracle_heartbeat_missed(
     );
 }
 
+pub fn emit_min_source_count_updated(env: &Env, old_count: u32, new_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "min_src_count_updated"),),
+        (old_count, new_count),
+    );
+}
+
 pub fn emit_guardian_set(env: &Env, guardian: Address) {
     env.events()
         .publish((Symbol::new(env, "guardian_set"),), guardian);

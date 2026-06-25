@@ -2,6 +2,7 @@
 
 pub mod dca;
 mod errors;
+pub mod feature_flags;
 pub mod keeper;
 mod oracle;
 pub mod risk_gates;
@@ -15,7 +16,9 @@ use risk_gates::{
     DEFAULT_ESTIMATED_COPY_TRADE_FEE, MAX_BATCH_SIZE,
 };
 use sdex::{execute_sdex_swap, min_received_from_slippage};
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, IntoVal, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol, Val, Vec,
+};
 
 use triggers::{ORACLE_KEY, PORTFOLIO_KEY};
 use wire::TRADE_TIMEOUT_LEDGERS;
@@ -59,6 +62,8 @@ pub enum StorageKey {
     CircuitBreakerLedger,
     MaxOpenInterestPerPair,
     OpenInterestPerPair(Address),
+    /// Feature flag: keyed by flag name. `true` = enabled, absent/`false` = disabled.
+    FeatureFlag(String),
 }
 
 /// Temporary-storage key for the reentrancy lock on `execute_copy_trade`.
@@ -726,6 +731,7 @@ impl TradeExecutorContract {
         order_type: OrderType,
         limit_price: Option<i128>,
     ) -> Result<(), ContractError> {
+        feature_flags::require_feature_enabled(&env, feature_flags::FEAT_COPY_TRADE)?;
         match order_type {
             OrderType::Market => {
                 execute_market_copy_trade(&env, user, token, amount, portfolio_pct_bps, true, None)
@@ -1151,6 +1157,7 @@ impl TradeExecutorContract {
         user: Address,
         signal_id: u64,
     ) -> Result<bool, ContractError> {
+        feature_flags::require_feature_enabled(&env, feature_flags::FEAT_DCA)?;
         // Capture config needed inside the closure before moving env.
         let portfolio: Option<Address> = env.storage().instance().get(&StorageKey::UserPortfolio);
         let exempt = {
@@ -1177,6 +1184,28 @@ impl TradeExecutorContract {
     pub fn cancel_dca_plan(env: Env, user: Address, signal_id: u64) -> Result<(), ContractError> {
         user.require_auth();
         dca::cancel_dca_plan(&env, &user, signal_id)
+    }
+
+    // ── Feature flag registry ─────────────────────────────────────────────────
+
+    /// Enable or disable a named feature flag.  Admin only.
+    ///
+    /// Emits a `feat_flag / changed` event for transparency.
+    /// Toggling a flag only affects entrypoints that explicitly check it;
+    /// all other entrypoints remain unaffected.
+    pub fn set_feature_flag(
+        env: Env,
+        name: String,
+        enabled: bool,
+    ) -> Result<(), ContractError> {
+        require_admin(&env)?;
+        feature_flags::set_flag(&env, name, enabled);
+        Ok(())
+    }
+
+    /// Return `true` when the named flag is enabled (or not set — flags default to enabled).
+    pub fn is_feature_enabled(env: Env, name: String) -> bool {
+        feature_flags::is_flag_enabled(&env, &name)
     }
 }
 

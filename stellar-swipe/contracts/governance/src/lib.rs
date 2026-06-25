@@ -82,8 +82,8 @@ use timelock::{
 };
 pub use token::{HolderAnalytics, HolderBalance, TokenMetadata};
 pub use treasury::{
-    Budget, BudgetApproval, BudgetReport, RebalanceAction, RecurringPayment, Treasury,
-    TreasuryReport, TreasurySpend,
+    AssetAllocation, Budget, BudgetApproval, BudgetReport, RebalanceAction, RecurringPayment,
+    Treasury, TreasuryDiversification, TreasuryReport, TreasurySpend,
 };
 
 const DEFAULT_LIQUIDITY_REWARD_BPS: u32 = 100;
@@ -1148,6 +1148,20 @@ impl GovernanceContract {
     pub fn treasury_report(env: Env) -> Result<TreasuryReport, GovernanceError> {
         require_initialized(&env)?;
         treasury::build_report(&env, &get_treasury(&env))
+    }
+
+    /// Return a live diversification snapshot of the treasury's holdings.
+    ///
+    /// `prices` must map each held asset to its current USD-equivalent price.
+    /// Assets with a zero balance or no price entry are excluded from the result.
+    /// Concentration metrics (basis points) use oracle-price-weighted values so
+    /// cross-asset comparisons are meaningful.
+    pub fn get_treasury_diversification(
+        env: Env,
+        prices: Map<Asset, i128>,
+    ) -> Result<TreasuryDiversification, GovernanceError> {
+        require_initialized(&env)?;
+        treasury::get_diversification(&env, &get_treasury(&env), &prices)
     }
 
     pub fn committees(env: Env) -> Result<Vec<Committee>, GovernanceError> {
