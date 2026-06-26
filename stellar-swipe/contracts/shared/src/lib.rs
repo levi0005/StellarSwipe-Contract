@@ -10,6 +10,8 @@ pub mod event_topics;
 pub mod events;
 /// Shared double-initialization guard (issue #584).
 pub mod initializable;
+/// Minimum-liquidity threshold guard for pooled-fund withdrawals (issue #591).
+pub mod liquidity_pool;
 pub mod math;
 #[allow(deprecated)]
 pub mod version;
