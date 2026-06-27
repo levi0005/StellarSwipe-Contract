@@ -416,6 +416,52 @@ impl OracleContract {
         get_oracle_stats(&env, &oracle)
     }
 
+    // ── Price normalization (Issue #decimal) ──────────────────────────────────
+
+    /// Admin: configure the native decimal precision for an asset pair.
+    ///
+    /// `decimals` is the number of fractional digits in the raw stored price
+    /// (e.g. 6 for a USDC-denominated feed where 1 USDC is stored as 1_000_000).
+    pub fn set_feed_decimals(
+        env: Env,
+        caller: Address,
+        pair: AssetPair,
+        decimals: u32,
+    ) -> Result<(), OracleError> {
+        Self::require_admin(&env, &caller)?;
+        caller.require_auth();
+        storage::set_feed_decimals(&env, &pair, decimals);
+        Ok(())
+    }
+
+    /// Read-only: return the configured native decimal precision for `pair`.
+    /// Returns `None` if no decimals have been configured.
+    pub fn get_feed_decimals(env: Env, pair: AssetPair) -> Option<u32> {
+        storage::get_feed_decimals(&env, &pair)
+    }
+
+    /// Read-only: return the current price for `pair` rescaled to `target_decimals`.
+    ///
+    /// Uses the same underlying price as `get_price` and rescales it so that
+    /// downstream consumers always work with a consistent decimal precision
+    /// regardless of how each asset's feed is originally stored.
+    ///
+    /// # Errors
+    /// - [`OracleError::PriceNotFound`] — no price set for `pair`, or no decimals
+    ///   configured (call `set_feed_decimals` first).
+    /// - [`OracleError::ConversionOverflow`] — rescaling would overflow `i128`.
+    pub fn get_normalized_price(
+        env: Env,
+        pair: AssetPair,
+        target_decimals: u32,
+    ) -> Result<i128, OracleError> {
+        let raw_price = storage::get_price(&env, &pair)?;
+        let from_decimals =
+            storage::get_feed_decimals(&env, &pair).ok_or(OracleError::PriceNotFound)?;
+        storage::rescale_price(raw_price, from_decimals, target_decimals)
+            .ok_or(OracleError::ConversionOverflow)
+    }
+
     fn read_oracles(env: &Env) -> Vec<Address> {
         env.storage()
             .persistent()

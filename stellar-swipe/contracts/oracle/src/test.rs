@@ -427,3 +427,135 @@ fn test_min_source_count_admin_only() {
     let result = client.try_set_min_source_count(&oracle1, &3u32);
     assert!(result.is_err());
 }
+
+// ── Oracle price normalisation tests ─────────────────────────────────────────
+
+fn make_pair(env: &Env, base: &str, quote: &str) -> stellar_swipe_common::AssetPair {
+    stellar_swipe_common::AssetPair {
+        base: stellar_swipe_common::Asset {
+            code: String::from_str(env, base),
+            issuer: None,
+        },
+        quote: stellar_swipe_common::Asset {
+            code: String::from_str(env, quote),
+            issuer: None,
+        },
+    }
+}
+
+#[test]
+fn test_set_and_get_feed_decimals() {
+    let (env, admin, _, _, _) = create_test_env();
+    let contract_id = env.register_contract(None, OracleContract);
+    let client = OracleContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &xlm_asset(&env));
+
+    let pair = make_pair(&env, "XLM", "USDC");
+    assert_eq!(client.get_feed_decimals(&pair), None);
+
+    client.set_feed_decimals(&admin, &pair, &7u32);
+    assert_eq!(client.get_feed_decimals(&pair), Some(7u32));
+}
+
+#[test]
+fn test_set_feed_decimals_non_admin_fails() {
+    let (env, admin, oracle1, _, _) = create_test_env();
+    let contract_id = env.register_contract(None, OracleContract);
+    let client = OracleContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &xlm_asset(&env));
+
+    let pair = make_pair(&env, "XLM", "USDC");
+    let result = client.try_set_feed_decimals(&oracle1, &pair, &7u32);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_normalized_price_same_decimals() {
+    let (env, admin, _, _, _) = create_test_env();
+    let contract_id = env.register_contract(None, OracleContract);
+    let client = OracleContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &xlm_asset(&env));
+
+    let pair = make_pair(&env, "XLM", "USDC");
+    // Store price 1_000_000 (6 decimals → 1.0 USDC).
+    client.set_price(&pair, &1_000_000i128);
+    client.set_feed_decimals(&admin, &pair, &6u32);
+
+    // Requesting target_decimals == native_decimals → no rescaling.
+    let price = client.get_normalized_price(&pair, &6u32).unwrap();
+    assert_eq!(price, 1_000_000i128);
+}
+
+#[test]
+fn test_get_normalized_price_scale_up() {
+    let (env, admin, _, _, _) = create_test_env();
+    let contract_id = env.register_contract(None, OracleContract);
+    let client = OracleContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &xlm_asset(&env));
+
+    // Asset A has 6 native decimals; caller wants 8 target decimals.
+    let pair_a = make_pair(&env, "USDC", "USD");
+    client.set_price(&pair_a, &1_000_000i128); // 1.000000 USDC
+    client.set_feed_decimals(&admin, &pair_a, &6u32);
+
+    let norm = client.get_normalized_price(&pair_a, &8u32).unwrap();
+    assert_eq!(norm, 100_000_000i128); // 1.000000 → 1.00000000
+}
+
+#[test]
+fn test_get_normalized_price_scale_down() {
+    let (env, admin, _, _, _) = create_test_env();
+    let contract_id = env.register_contract(None, OracleContract);
+    let client = OracleContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &xlm_asset(&env));
+
+    // Asset B has 8 native decimals; caller wants 6 target decimals.
+    let pair_b = make_pair(&env, "BTC", "USD");
+    client.set_price(&pair_b, &6_000_000_000_000i128); // 60_000.00000000 USD (8 dec)
+    client.set_feed_decimals(&admin, &pair_b, &8u32);
+
+    let norm = client.get_normalized_price(&pair_b, &6u32).unwrap();
+    assert_eq!(norm, 60_000_000_000i128); // 60_000.000000 (6 dec)
+}
+
+#[test]
+fn test_get_normalized_price_differing_native_decimals_to_common_target() {
+    let (env, admin, _, _, _) = create_test_env();
+    let contract_id = env.register_contract(None, OracleContract);
+    let client = OracleContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &xlm_asset(&env));
+
+    let pair_xlm = make_pair(&env, "XLM", "USD");
+    let pair_usdc = make_pair(&env, "USDC", "USD");
+
+    // XLM stored with 7 decimals (Stellar native), USDC with 6 decimals.
+    client.set_price(&pair_xlm, &1_100_0000i128); // 1.1000000 USD (7 dec)
+    client.set_feed_decimals(&admin, &pair_xlm, &7u32);
+
+    client.set_price(&pair_usdc, &1_000_000i128); // 1.000000 USD (6 dec)
+    client.set_feed_decimals(&admin, &pair_usdc, &6u32);
+
+    // Normalise both to 8 decimals for consistent comparison.
+    let xlm_norm = client.get_normalized_price(&pair_xlm, &8u32).unwrap();
+    let usdc_norm = client.get_normalized_price(&pair_usdc, &8u32).unwrap();
+
+    assert_eq!(xlm_norm, 110_000_000i128);  // 1.10000000
+    assert_eq!(usdc_norm, 100_000_000i128); // 1.00000000
+    // XLM is now priced above USDC, as expected.
+    assert!(xlm_norm > usdc_norm);
+}
+
+#[test]
+fn test_get_normalized_price_no_decimals_configured_returns_error() {
+    let (env, admin, _, _, _) = create_test_env();
+    let contract_id = env.register_contract(None, OracleContract);
+    let client = OracleContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &xlm_asset(&env));
+
+    let pair = make_pair(&env, "ETH", "USD");
+    client.set_price(&pair, &2_000_000_000i128);
+    // Deliberately omit set_feed_decimals.
+
+    let result = client.try_get_normalized_price(&pair, &6u32);
+    assert!(result.is_err());
+}
