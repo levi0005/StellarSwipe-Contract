@@ -50,6 +50,41 @@ Both should pass with no manual fixes required.
 Extend `DataKey` and `{ContractName}Error` with your contract-specific variants
 before adding business logic.
 
+## Dependency policy
+
+CI runs `cargo deny check` (via `stellar-swipe/deny.toml`) on every PR that
+touches a `Cargo.toml` or `Cargo.lock`.  The policy covers:
+
+| Area | Rule |
+|------|------|
+| Licenses | Only the allow-list in `deny.toml` is permitted.  Unlicensed or copyleft crates are denied. |
+| Banned crates | `openssl` and `ring ≤0.16` are banned.  See `[bans]` for the full list. |
+| Git sources | `unknown-git = "deny"`.  Git dependencies pinned to a mutable branch (no `rev =`) are not allowed; they break reproducible builds. |
+| Advisories | Crates with active RustSec advisories are denied unless individually listed in `[advisories] ignore` with a documented reason. |
+
+### Adding a new dependency
+
+1. Add the dependency to the relevant `Cargo.toml`.
+2. Run `cargo deny check` locally (`cargo install cargo-deny` if not installed).
+3. If the check passes, open a normal PR.
+4. If the check fails (e.g. the crate uses a license not on the allow-list):
+   - Replace the dependency with a compliant alternative, **or**
+   - Open a PR with the `dependency-review` label and explain why the policy
+     should be extended.  A maintainer must approve before the dependency can
+     be added.
+
+### Requesting a policy exception
+
+Open a PR with the `dependency-review` label.  The description must include:
+
+1. The crate name, version, and why it is needed.
+2. Why a compliant alternative does not exist.
+3. The specific `deny.toml` change required (e.g. adding a license or an
+   advisory to the ignore list).
+4. For advisories: the upstream issue/PR tracking the fix.
+
+Two maintainer approvals are required for any policy exception.
+
 ## Clippy policy
 
 CI runs `cargo clippy --workspace --all-targets -- -D warnings`.  Any clippy

@@ -60,6 +60,16 @@ jobs:
       - name: Tests
         run: cd stellar-swipe && cargo test --workspace --all-targets
 
+      # Supply-chain: license, banned crates, source restrictions, advisories.
+      # Policy lives in stellar-swipe/deny.toml.  Any violation fails the build.
+      # To request a new dependency or policy exception see CONTRIBUTING.md.
+      - name: cargo-deny (license / ban / source / advisory check)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: stellar-swipe/Cargo.toml
+          command: check
+          arguments: --all-features
+
       # Audit dependency versions consistency
       - name: Audit workspace dependencies
         run: python3 stellar-swipe/scripts/audit_dependencies.py
