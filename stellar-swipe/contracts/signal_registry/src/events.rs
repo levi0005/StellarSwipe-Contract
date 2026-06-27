@@ -1,3 +1,4 @@
+use crate::migration::MigrationSnapshot;
 use crate::types::{Asset, MigrationProgress};
 use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 
@@ -372,6 +373,25 @@ pub fn emit_provider_cooling_off_started(env: &Env, provider: Address, ends_at: 
 pub fn emit_migration_progress(env: &Env, progress: MigrationProgress) {
     let topics = (Symbol::new(env, "migration_progress"),);
     env.events().publish(topics, progress);
+}
+
+/// Post-migration invariants reconciled successfully (issue #597).
+pub fn emit_migration_verified(env: &Env, post: MigrationSnapshot) {
+    let topics = (Symbol::new(env, "migration_verified"),);
+    env.events().publish(topics, post);
+}
+
+/// Post-migration invariants did NOT reconcile (issue #597): the migrated
+/// data's record count / total_volume sum differs from the pre-migration
+/// snapshot taken over the same id scope. Flags the migration as requiring
+/// manual review/rollback.
+pub fn emit_migration_verification_failed(
+    env: &Env,
+    verification: crate::migration::MigrationVerification,
+) {
+    let topics = (Symbol::new(env, "migration_verify_failed"),);
+    env.events()
+        .publish(topics, (verification.pre, verification.post));
 }
 
 pub fn emit_signal_orphaned(env: &Env, signal_id: u64, reason: String) {
