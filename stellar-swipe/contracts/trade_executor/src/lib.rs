@@ -11,6 +11,7 @@ pub mod triggers;
 mod wire;
 
 use errors::{ContractError, InsufficientBalanceDetail, NetworkErrorDetail};
+use shared::math::normalize_amount;
 use risk_gates::{
     check_user_balance, resolve_trade_amount, validate_and_record_position,
     validate_min_trade_size, DEFAULT_ESTIMATED_COPY_TRADE_FEE, DEFAULT_MIN_TRADE_SIZE,
@@ -1130,10 +1131,14 @@ impl TradeExecutorContract {
 
         // Convert the entry-position value to `to_token` units so that both
         // `exit_price` and the entry value are expressed in the same asset unit.
-        let entry_value = amount
-            .checked_mul(entry_price)
-            .ok_or(ContractError::InvalidAmount)?
-            / ENTRY_PRICE_DENOMINATOR;
+        // entry_price is in 7-decimal fixed-point, so amount × entry_price has
+        // 14 implicit decimals; normalize back to 7 via the shared utility.
+        let entry_value = {
+            let product = amount
+                .checked_mul(entry_price)
+                .ok_or(ContractError::InvalidAmount)?;
+            normalize_amount(product, 14, 7).ok_or(ContractError::InvalidAmount)?
+        };
         let realized_pnl = exit_price - entry_value;
         let close_sym = Symbol::new(&env, "close_position");
         let mut close_args = Vec::<Val>::new(&env);
