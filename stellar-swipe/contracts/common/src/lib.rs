@@ -23,7 +23,10 @@ pub use amm_bridge::{
     AmmRouteSegment, AmmSourceConfig, AmmSourceKind, BPS_DENOMINATOR, FN_GET_BEST_ASK, FN_SWAP,
 };
 pub use assets::{validate_asset_pair, Asset, AssetPair, AssetPairError};
-pub use commit_reveal::{constant_time_eq, hash_trade_intent, verify_commitment};
+pub use commit_reveal::{
+    constant_time_eq, forfeit_expired, hash_trade_intent, reveal_and_clear, store_commitment,
+    verify_commitment, CommitKey, CommitRecord, CommitRevealError,
+};
 pub use constants::{
     BASIS_POINTS_DENOMINATOR, BASIS_POINTS_DENOMINATOR_I128, CAT_ALL, CAT_SIGNALS, CAT_STAKES,
     CAT_TRADING, LEDGERS_PER_30_DAY_MONTH, LEDGERS_PER_DAY, PLACEHOLDER_ADMIN_STR,
