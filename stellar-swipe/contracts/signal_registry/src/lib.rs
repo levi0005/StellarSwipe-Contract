@@ -7,6 +7,7 @@ static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 mod admin;
 mod analytics;
 mod categories;
+mod churn_risk;
 mod collaboration;
 mod combos;
 mod community_voting;
@@ -1961,6 +1962,45 @@ impl SignalRegistry {
     ) -> analytics::CategoryAnalytics {
         let signals = Self::get_signals_map(&env);
         analytics::calculate_category_analytics(&env, &signals, &category)
+    }
+
+    // ── Churn-risk scoring (Issue #churn) ────────────────────────────────────
+
+    /// Read-only: compute the churn-risk score for a provider.
+    ///
+    /// Combines trailing signal-frequency decline (40 %), follower-unsubscribe
+    /// rate (30 %), and performance trend (30 %) into a composite 0–100 score.
+    /// Emits `churn_risk_elevated` when the composite score meets or exceeds the
+    /// admin-configured threshold.
+    pub fn get_provider_churn_risk(
+        env: Env,
+        provider: Address,
+    ) -> churn_risk::ChurnRiskScore {
+        let signals = Self::get_signals_map(&env);
+        let stats_map = Self::get_provider_stats_map(&env);
+        let stats = stats_map.get(provider.clone());
+        churn_risk::get_provider_churn_risk(&env, &provider, &signals, stats.as_ref())
+    }
+
+    /// Admin: set the composite-score threshold above which `churn_risk_elevated`
+    /// is emitted. Valid range 0–100. Default is 67 (high-risk boundary).
+    pub fn set_churn_risk_threshold(
+        env: Env,
+        caller: Address,
+        threshold: u32,
+    ) -> Result<(), AdminError> {
+        admin::require_admin(&env, &caller)?;
+        caller.require_auth();
+        if threshold > 100 {
+            return Err(AdminError::InvalidParameter);
+        }
+        churn_risk::set_churn_threshold(&env, threshold);
+        Ok(())
+    }
+
+    /// Admin: get the current churn-risk threshold.
+    pub fn get_churn_risk_threshold(env: Env) -> u32 {
+        churn_risk::get_churn_threshold(&env)
     }
 
     /* =========================
