@@ -110,6 +110,9 @@ fn execute_copy_trade_blocked_when_flag_disabled() {
         &None,
         &crate::OrderType::Market,
         &None,
+        &1u64,
+        &soroban_sdk::Bytes::from_array(&env, &[0u8; 32]),
+        &(env.ledger().timestamp() + 86_400),
     );
     assert_eq!(
         result,

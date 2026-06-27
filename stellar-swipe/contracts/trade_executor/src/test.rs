@@ -9,7 +9,7 @@ use crate::{
         MAX_POSITIONS_PER_USER, MAX_POSITION_PCT_BPS,
     },
     sdex::{self, execute_sdex_swap},
-    OrderType, TradeExecutorContract, TradeExecutorContractClient,
+    OrderType, ReplayParams, TradeExecutorContract, TradeExecutorContractClient,
 };
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short,
@@ -202,6 +202,143 @@ fn check_user_balance_more_than_sufficient() {
     let fee: i128 = 10;
     StellarAssetClient::new(&env, &token).mint(&user, &(amount + fee + 1_000_000));
     assert!(check_user_balance(&env, &user, &token, amount, fee).is_ok());
+}
+
+// ── Minimum trade size tests (Issue #590) ──────────────────────────────────────
+
+#[test]
+fn execute_copy_trade_below_default_minimum_is_rejected() {
+    let (env, exec_id, portfolio_id, user, _admin, token) =
+        setup_with_balance(1_000_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    let below_default_min = crate::risk_gates::DEFAULT_MIN_TRADE_SIZE - 1;
+    let err = exec.try_execute_copy_trade(
+        &user,
+        &token,
+        &below_default_min,
+        &None::<u32>,
+        &OrderType::Market,
+        &None,
+        &1u64,
+        &test_tx_hash(&env, 0),
+        &far_future(&env),
+    );
+    assert_eq!(err, Err(Ok(ContractError::BelowMinimumTradeSize)));
+
+    // No state change occurred: the portfolio never recorded a position.
+    assert_eq!(
+        MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
+        0
+    );
+}
+
+#[test]
+fn execute_copy_trade_below_per_asset_minimum_is_rejected() {
+    let (env, exec_id, _portfolio_id, user, _admin, token) =
+        setup_with_balance(1_000_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    exec.set_min_trade_size(&token, &10_000_000);
+
+    let err = exec.try_execute_copy_trade(
+        &user,
+        &token,
+        &9_999_999,
+        &None::<u32>,
+        &OrderType::Market,
+        &None,
+        &1u64,
+        &test_tx_hash(&env, 0),
+        &far_future(&env),
+    );
+    assert_eq!(err, Err(Ok(ContractError::BelowMinimumTradeSize)));
+}
+
+#[test]
+fn execute_copy_trade_exactly_at_minimum_is_accepted() {
+    let (env, exec_id, portfolio_id, user, _admin, token) =
+        setup_with_balance(1_000_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    exec.set_min_trade_size(&token, &10_000_000);
+
+    exec.execute_copy_trade(
+        &user,
+        &token,
+        &10_000_000,
+        &None::<u32>,
+        &OrderType::Market,
+        &None,
+        &1u64,
+        &test_tx_hash(&env, 0),
+        &far_future(&env),
+    );
+
+    assert_eq!(
+        MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
+        1
+    );
+}
+
+#[test]
+fn execute_copy_trade_above_minimum_is_accepted() {
+    let (env, exec_id, portfolio_id, user, _admin, token) =
+        setup_with_balance(1_000_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    exec.set_min_trade_size(&token, &10_000_000);
+
+    exec.execute_copy_trade(
+        &user,
+        &token,
+        &10_000_001,
+        &None::<u32>,
+        &OrderType::Market,
+        &None,
+        &1u64,
+        &test_tx_hash(&env, 0),
+        &far_future(&env),
+    );
+
+    assert_eq!(
+        MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
+        1
+    );
+}
+
+#[test]
+fn admin_can_update_min_trade_size_for_asset() {
+    let (env, exec_id, _portfolio_id, _user, _admin, token) =
+        setup_with_balance(1_000_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    assert_eq!(
+        exec.get_min_trade_size(&token),
+        crate::risk_gates::DEFAULT_MIN_TRADE_SIZE
+    );
+
+    exec.set_min_trade_size(&token, &5_000_000);
+    assert_eq!(exec.get_min_trade_size(&token), 5_000_000);
+}
+
+#[test]
+fn limit_order_below_minimum_trade_size_is_rejected() {
+    let (env, exec_id, _portfolio_id, user, _admin, token) =
+        setup_with_balance(1_000_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    exec.set_min_trade_size(&token, &10_000_000);
+
+    let err = exec.try_execute_copy_trade(
+        &user,
+        &token,
+        &9_999_999,
+        &None::<u32>,
+        &OrderType::Limit,
+        &Some(100_0000000i128),
+        &1u64,
+        &test_tx_hash(&env, 0),
+        &far_future(&env),
+    );
+    assert_eq!(err, Err(Ok(ContractError::BelowMinimumTradeSize)));
+    assert_eq!(exec.get_pending_limit_order_ids().len(), 0);
 }
 
 // ── execute_copy_trade tests ──────────────────────────────────────────────────
@@ -419,6 +556,9 @@ impl ReentrantPortfolio {
             &None::<u32>,
             &OrderType::Market,
             &None,
+            &1u64,
+            &soroban_sdk::Bytes::from_array(&env, &[0u8; 32]),
+            &(env.ledger().timestamp() + 86_400),
         );
         let blocked = matches!(result, Err(Ok(ContractError::ReentrancyDetected)));
         env.storage()
@@ -830,7 +970,7 @@ fn cancel_copy_trade_success() {
     );
     exec.cancel_copy_trade(
         &user, &user, &1u64, &token_a, &token_b, &1_000_000, &900_000, &10_000_000,
-        &1u64, &test_tx_hash(&env, 0), &far_future(&env),
+        &ReplayParams { nonce: 1, tx_hash: test_tx_hash(&env, 0), expiry_ts: far_future(&env) },
     );
 
     assert_eq!(
@@ -860,9 +1000,11 @@ fn cancel_copy_trade_unauthorized() {
             1_000_000,
             900_000,
             10_000_000,
-            1u64,
-            test_tx_hash(&env, 0),
-            far_future(&env),
+            ReplayParams {
+                nonce: 1,
+                tx_hash: test_tx_hash(&env, 0),
+                expiry_ts: far_future(&env),
+            },
         )
     });
     assert_eq!(err, Err(ContractError::Unauthorized));
@@ -885,9 +1027,11 @@ fn cancel_copy_trade_not_found() {
             1_000_000,
             900_000,
             10_000_000,
-            1u64,
-            test_tx_hash(&env, 0),
-            far_future(&env),
+            ReplayParams {
+                nonce: 1,
+                tx_hash: test_tx_hash(&env, 0),
+                expiry_ts: far_future(&env),
+            },
         )
     });
     assert_eq!(err, Err(ContractError::TradeNotFound));
@@ -907,7 +1051,7 @@ fn cancel_copy_trade_pnl_calculation() {
     portfolio.add_position_with_entry_price(&user, &2u64, &9_500_000i128);
     exec.cancel_copy_trade(
         &user, &user, &2u64, &token_a, &token_b, &1_000_000, &900_000, &9_500_000,
-        &1u64, &test_tx_hash(&env, 0), &far_future(&env),
+        &ReplayParams { nonce: 1, tx_hash: test_tx_hash(&env, 0), expiry_ts: far_future(&env) },
     );
 
     // Verify the close_position was called with the correct realized_pnl.
@@ -915,6 +1059,7 @@ fn cancel_copy_trade_pnl_calculation() {
     assert_eq!(closed_id, Some(2u64));
     let pnl = portfolio.last_pnl();
     assert_eq!(pnl, Some(250_000i128), "realized PnL should be 250_000 when entry_price=0.95 and exit_price=1.2 for amount=1_000_000");
+}
 
 // ── Auth propagation: cancel_copy_trade ──────────────────────────────────────
 
@@ -939,9 +1084,11 @@ fn cancel_copy_trade_third_party_rejected() {
             1_000_000,
             900_000,
             10_000_000,
-            1u64,
-            test_tx_hash(&env, 0),
-            far_future(&env),
+            ReplayParams {
+                nonce: 1,
+                tx_hash: test_tx_hash(&env, 0),
+                expiry_ts: far_future(&env),
+            },
         )
     });
     assert_eq!(err, Err(ContractError::Unauthorized));
@@ -958,7 +1105,7 @@ fn cancel_copy_trade_replay_nonce_rejected() {
     );
     exec.cancel_copy_trade(
         &user, &user, &1u64, &token_a, &token_b, &1_000_000, &900_000, &10_000_000,
-        &1u64, &test_tx_hash(&env, 1), &far_future(&env),
+        &ReplayParams { nonce: 1, tx_hash: test_tx_hash(&env, 1), expiry_ts: far_future(&env) },
     );
 
     let err = env.as_contract(&exec_id, || {
@@ -972,9 +1119,11 @@ fn cancel_copy_trade_replay_nonce_rejected() {
             1_000_000,
             900_000,
             10_000_000,
-            1u64,
-            test_tx_hash(&env, 1),
-            far_future(&env),
+            ReplayParams {
+                nonce: 1,
+                tx_hash: test_tx_hash(&env, 1),
+                expiry_ts: far_future(&env),
+            },
         )
     });
     assert_eq!(err, Err(ContractError::ReplayDetected));
@@ -1002,7 +1151,7 @@ fn trade_cancelled_event_has_two_topic_format() {
     );
     exec.cancel_copy_trade(
         &user, &user, &1u64, &token_a, &token_b, &1_000_000, &900_000, &10_000_000,
-        &1u64, &test_tx_hash(&env, 0), &far_future(&env),
+        &ReplayParams { nonce: 1, tx_hash: test_tx_hash(&env, 0), expiry_ts: far_future(&env) },
     );
     let (contract, event) = last_event_topics(&env);
     assert_eq!(contract, soroban_sdk::Symbol::new(&env, "trade_executor"));

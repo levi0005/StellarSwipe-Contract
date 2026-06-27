@@ -116,6 +116,9 @@ fn copy_trade_storage_rent_baseline_smoke() {
         &None,
         &crate::OrderType::Market,
         &None,
+        &1u64,
+        &soroban_sdk::Bytes::from_array(&env, &[0u8; 32]),
+        &(env.ledger().timestamp() + 86_400),
     );
     // The test passes if the entrypoint returns Ok (storage writes were committed).
     assert!(

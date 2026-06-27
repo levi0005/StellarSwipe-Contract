@@ -305,6 +305,7 @@ fn stress_high_frequency_trades_respect_daily_volume_boundary() {
     exec.set_daily_volume_limit(&(per_trade * trade_count));
 
     for i in 0..trade_count {
+        let nonce = (i + 1) as u64;
         let result = exec.try_execute_copy_trade(
             &user,
             &token,
@@ -312,6 +313,9 @@ fn stress_high_frequency_trades_respect_daily_volume_boundary() {
             &None::<u32>,
             &OrderType::Market,
             &None,
+            &nonce,
+            &soroban_sdk::Bytes::from_array(&env, &[(i + 1) as u8; 32]),
+            &(env.ledger().timestamp() + 86_400),
         );
         assert!(
             result.is_ok(),
@@ -320,6 +324,7 @@ fn stress_high_frequency_trades_respect_daily_volume_boundary() {
     }
 
     // The next trade would push cumulative volume past the limit.
+    let next_nonce = (trade_count + 1) as u64;
     let result = exec.try_execute_copy_trade(
         &user,
         &token,
@@ -327,6 +332,9 @@ fn stress_high_frequency_trades_respect_daily_volume_boundary() {
         &None::<u32>,
         &OrderType::Market,
         &None,
+        &next_nonce,
+        &soroban_sdk::Bytes::from_array(&env, &[(trade_count + 1) as u8; 32]),
+        &(env.ledger().timestamp() + 86_400),
     );
     assert_eq!(result, Err(Ok(ContractError::DailyVolumeLimitExceeded)));
 }

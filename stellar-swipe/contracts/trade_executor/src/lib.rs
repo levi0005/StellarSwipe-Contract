@@ -13,7 +13,8 @@ mod wire;
 use errors::{ContractError, InsufficientBalanceDetail, NetworkErrorDetail};
 use risk_gates::{
     check_user_balance, resolve_trade_amount, validate_and_record_position,
-    DEFAULT_ESTIMATED_COPY_TRADE_FEE, MAX_BATCH_SIZE,
+    validate_min_trade_size, DEFAULT_ESTIMATED_COPY_TRADE_FEE, DEFAULT_MIN_TRADE_SIZE,
+    MAX_BATCH_SIZE,
 };
 use sdex::{execute_sdex_swap, min_received_from_slippage};
 use soroban_sdk::{
@@ -65,6 +66,8 @@ pub enum StorageKey {
     OpenInterestPerPair(Address),
     /// Feature flag: keyed by flag name. `true` = enabled, absent/`false` = disabled.
     FeatureFlag(String),
+    /// Per-asset minimum trade size override (absent = use [`DEFAULT_MIN_TRADE_SIZE`]).
+    MinTradeSize(Address),
 }
 
 /// Temporary-storage key for the reentrancy lock on `execute_copy_trade`.
@@ -143,6 +146,16 @@ pub enum OrderType {
     Limit,
 }
 
+/// Replay-protection trio, bundled into one struct so contract entrypoints with
+/// several other arguments stay under Soroban's 10-parameter function limit.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayParams {
+    pub nonce: u64,
+    pub tx_hash: Bytes,
+    pub expiry_ts: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingLimitOrder {
@@ -167,6 +180,15 @@ fn effective_estimated_fee(env: &Env) -> i128 {
 
 fn require_admin(env: &Env) -> Result<Address, ContractError> {
     oracle::require_admin(env)
+}
+
+/// Effective per-asset minimum trade size: the admin-configured override for `token`,
+/// or [`DEFAULT_MIN_TRADE_SIZE`] when no override has been set.
+fn effective_min_trade_size(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::MinTradeSize(token.clone()))
+        .unwrap_or(DEFAULT_MIN_TRADE_SIZE)
 }
 
 #[contracttype]
@@ -298,6 +320,7 @@ fn execute_market_copy_trade(
     if amount <= 0 {
         return Err(ContractError::InvalidAmount);
     }
+    validate_min_trade_size(amount, effective_min_trade_size(env, &token))?;
 
     let cb_active = batch_ctx
         .map(|c| c.circuit_breaker_active)
@@ -538,6 +561,28 @@ impl TradeExecutorContract {
         effective_estimated_fee(&env)
     }
 
+    /// Admin: set the minimum trade size for `token` (dust-amount griefing guard).
+    /// Trades/copy-trades below this amount are rejected before any state changes.
+    pub fn set_min_trade_size(env: Env, token: Address, minimum: i128) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("not initialized");
+        admin.require_auth();
+        if minimum < 0 {
+            panic!("minimum must be non-negative");
+        }
+        env.storage()
+            .instance()
+            .set(&StorageKey::MinTradeSize(token), &minimum);
+    }
+
+    /// Effective minimum trade size for `token` (override, or [`DEFAULT_MIN_TRADE_SIZE`]).
+    pub fn get_min_trade_size(env: Env, token: Address) -> i128 {
+        effective_min_trade_size(&env, &token)
+    }
+
     /// Admin override: exempt `user` from the per-user position cap (or clear exemption).
     pub fn set_position_limit_exempt(env: Env, user: Address, exempt: bool) {
         let admin: Address = env
@@ -759,6 +804,7 @@ impl TradeExecutorContract {
                 if price <= 0 {
                     return Err(ContractError::InvalidAmount);
                 }
+                validate_min_trade_size(amount, effective_min_trade_size(&env, &token))?;
 
                 let fee = effective_estimated_fee(&env);
                 let bal_key = StorageKey::LastInsufficientBalance(user.clone());
@@ -1047,11 +1093,9 @@ impl TradeExecutorContract {
         amount: i128,
         min_received: i128,
         entry_price: i128,
-        nonce: u64,
-        tx_hash: Bytes,
-        expiry_ts: u64,
+        replay: ReplayParams,
     ) -> Result<(), ContractError> {
-        verify_and_commit(&env, &user, nonce, tx_hash, expiry_ts)
+        verify_and_commit(&env, &user, replay.nonce, replay.tx_hash, replay.expiry_ts)
             .map_err(|_| ContractError::ReplayDetected)?;
         caller.require_auth();
         if caller != user {

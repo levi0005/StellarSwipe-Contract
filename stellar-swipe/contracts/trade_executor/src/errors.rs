@@ -57,6 +57,8 @@ pub enum ContractError {
     FeatureDisabled = 23,
     /// A replayed transaction was detected (nonce mismatch, duplicate hash, or expired).
     ReplayDetected = 24,
+    /// Trade amount is below the configured per-asset minimum (dust-amount griefing guard).
+    BelowMinimumTradeSize = 25,
 }
 
 /// Populated when [`ContractError::InsufficientLiquidity`] is returned.
