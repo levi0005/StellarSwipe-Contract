@@ -1,5 +1,7 @@
 use crate::errors::AdminError;
-use crate::types::{RecurrencePattern, ScheduleStatus, ScheduledSignal, SignalData};
+use crate::types::{
+    RecurrencePattern, ScheduleStatus, ScheduledSignal, SignalDataV2, VersionedSignalData,
+};
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 #[contracttype]
@@ -9,10 +11,14 @@ pub enum ScheduleDataKey {
     NextScheduleId,
 }
 
+/// Schedule a new signal for future publication. The `signal_data` parameter
+/// uses the current V2 shape; it is stored as `VersionedSignalData::V2` so
+/// that older V1 records (stored before Issue #568) coexist transparently
+/// in persistent storage.
 pub fn schedule_signal(
     env: Env,
     provider: Address,
-    signal_data: SignalData,
+    signal_data: SignalDataV2,
     publish_at: u64,
     recurrence: RecurrencePattern,
 ) -> Result<u64, AdminError> {
@@ -42,10 +48,11 @@ pub fn schedule_signal(
         .get(&ScheduleDataKey::NextScheduleId)
         .unwrap_or(0);
 
+    // Always write new records as V2 (Issue #568).
     let scheduled = ScheduledSignal {
         id: schedule_id,
         provider: provider.clone(),
-        signal_data,
+        signal_data: VersionedSignalData::V2(signal_data),
         publish_at,
         recurrence,
         status: ScheduleStatus::Pending,
@@ -66,6 +73,10 @@ pub fn schedule_signal(
     Ok(schedule_id)
 }
 
+/// Publish all pending schedules whose `publish_at` has elapsed.
+/// Reads handle both V1 and V2 signal-data variants transparently; recurring
+/// next-occurrences are re-written as V2 so the data migrates forward
+/// on first publish without a separate migration pass (Issue #568).
 pub fn publish_scheduled_signals(env: Env) -> Vec<u64> {
     let mut published_ids = Vec::new(&env);
     let current_time = env.ledger().timestamp();
@@ -86,7 +97,9 @@ pub fn publish_scheduled_signals(env: Env) -> Vec<u64> {
                 published_ids.push_back(scheduled.id);
 
                 if scheduled.recurrence.is_recurring && scheduled.recurrence.repeat_count > 0 {
-                    schedule_next_occurrence(&env, &scheduled, scheduled.recurrence.clone());
+                    // Upgrade V1 → V2 on first publish of a recurring schedule.
+                    let resolved = scheduled.signal_data.clone().resolve();
+                    schedule_next_occurrence(&env, &scheduled, scheduled.recurrence.clone(), resolved);
                 }
 
                 env.storage()
@@ -98,7 +111,14 @@ pub fn publish_scheduled_signals(env: Env) -> Vec<u64> {
     published_ids
 }
 
-fn schedule_next_occurrence(env: &Env, current: &ScheduledSignal, mut pattern: RecurrencePattern) {
+/// Clone the recurring schedule forward, re-writing signal data as V2 so any
+/// V1 data is upgraded on the fly (Issue #568).
+fn schedule_next_occurrence(
+    env: &Env,
+    current: &ScheduledSignal,
+    mut pattern: RecurrencePattern,
+    resolved_data: SignalDataV2,
+) {
     let next_id: u64 = env
         .storage()
         .instance()
@@ -110,7 +130,8 @@ fn schedule_next_occurrence(env: &Env, current: &ScheduledSignal, mut pattern: R
     let next_scheduled = ScheduledSignal {
         id: next_id,
         provider: current.provider.clone(),
-        signal_data: current.signal_data.clone(),
+        // Forward-write as V2 so the next occurrence is always current shape.
+        signal_data: VersionedSignalData::V2(resolved_data),
         publish_at: current.publish_at + pattern.interval_seconds,
         recurrence: pattern,
         status: ScheduleStatus::Pending,
@@ -144,4 +165,19 @@ pub fn cancel_scheduled_signal(
         .persistent()
         .set(&ScheduleDataKey::Schedule(schedule_id), &scheduled);
     Ok(())
+}
+
+/// Read a stored scheduled signal and return the resolved V2 signal data
+/// alongside the full record. Transparently upgrades any V1 record on read
+/// (Issue #568). Returns `None` if no record exists for `schedule_id`.
+pub fn get_scheduled_signal_data(
+    env: &Env,
+    schedule_id: u64,
+) -> Option<(ScheduledSignal, SignalDataV2)> {
+    let scheduled: ScheduledSignal = env
+        .storage()
+        .persistent()
+        .get(&ScheduleDataKey::Schedule(schedule_id))?;
+    let resolved = scheduled.signal_data.clone().resolve();
+    Some((scheduled, resolved))
 }

@@ -40,6 +40,9 @@ mod test_reputation;
 mod types;
 mod validation;
 mod versioning;
+/// Storage-layout XDR snapshot regression tests (Issue #580).
+#[cfg(test)]
+mod storage_layout_tests;
 
 pub use categories::{RiskLevel, SignalCategory};
 pub use multisig_approvals::CriticalActionPayload;
@@ -91,9 +94,12 @@ pub use templates::SignalTemplate;
 use templates::DEFAULT_TEMPLATE_EXPIRY_HOURS;
 use types::{
     AddressMapping, Asset, CrossChainSignal, ImportResultView, ProviderMonthlyReport,
-    RecurrencePattern, Signal, SignalData, SignalEditInput, SignalPerformanceView, SignalSummary,
+    RecurrencePattern, Signal, SignalDataV2, SignalEditInput, SignalPerformanceView, SignalSummary,
     SortOption, SyncStatus, TradeExecution,
 };
+// SignalData is a type alias for SignalDataV2; keep the alias re-export for
+// any external clients compiled against the old name (Issue #568).
+pub use types::SignalData;
 use versioning::{CopyRecord, SignalVersion};
 
 const MAX_EXPIRY_SECONDS: u64 = SECONDS_PER_30_DAY_MONTH;
@@ -425,10 +431,13 @@ impl SignalRegistry {
         get_admin(&env)
     }
 
+    /// Schedule a signal for future publication. `signal_data` must use the
+    /// current V2 shape; stored internally as `VersionedSignalData::V2` so
+    /// that legacy V1 records coexist transparently (Issue #568).
     pub fn schedule(
         env: Env,
         provider: Address,
-        signal_data: SignalData,
+        signal_data: SignalDataV2,
         publish_at: u64,
         recurrence: RecurrencePattern,
     ) -> Result<u64, AdminError> {

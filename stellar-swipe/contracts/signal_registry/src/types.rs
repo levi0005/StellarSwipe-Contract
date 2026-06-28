@@ -266,13 +266,71 @@ pub struct ImportResultView {
 // NEW SCHEDULING TYPES (Issue #42)
 // ==========================================
 
+/// V1 shape of SignalData — the original 4-field layout stored before the
+/// versioned-enum pattern was introduced (Issue #568). Kept for backward
+/// compatibility: any records written under the old shape decode as
+/// `VersionedSignalData::V1(SignalDataV1 { .. })` and are transparently
+/// upgraded to V2 on read.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SignalData {
+pub struct SignalDataV1 {
     pub asset_pair: String,
     pub action: SignalAction,
     pub price: i128,
     pub rationale: String,
+}
+
+/// Current (V2) shape of SignalData. Extends V1 with provider confidence
+/// and risk level, enabling richer scheduling context without a full
+/// migration pass over existing records (Issue #568).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignalDataV2 {
+    pub asset_pair: String,
+    pub action: SignalAction,
+    pub price: i128,
+    pub rationale: String,
+    /// Provider confidence in this signal, 0–100.
+    pub confidence: u32,
+    /// Risk classification carried through to the published signal.
+    pub risk_level: crate::categories::RiskLevel,
+}
+
+/// Convenience alias so call-sites can refer to the current shape as
+/// `SignalData` without knowing the version number.
+pub type SignalData = SignalDataV2;
+
+/// Versioned wrapper stored in [`ScheduledSignal`]. Old records serialised as
+/// V1 remain readable; new records are always written as V2 (Issue #568).
+///
+/// Match / upgrade pattern:
+/// ```text
+/// let current: SignalDataV2 = versioned.resolve();
+/// ```
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum VersionedSignalData {
+    V1(SignalDataV1),
+    V2(SignalDataV2),
+}
+
+impl VersionedSignalData {
+    /// Resolve to the current V2 shape, upgrading a V1 record with sensible
+    /// defaults when encountered. All new data is written as V2, so this path
+    /// is only exercised for records that pre-date the versioned-enum pattern.
+    pub fn resolve(self) -> SignalDataV2 {
+        match self {
+            VersionedSignalData::V2(v2) => v2,
+            VersionedSignalData::V1(v1) => SignalDataV2 {
+                asset_pair: v1.asset_pair,
+                action: v1.action,
+                price: v1.price,
+                rationale: v1.rationale,
+                confidence: 50,
+                risk_level: crate::categories::RiskLevel::Medium,
+            },
+        }
+    }
 }
 
 #[contracttype]
@@ -297,7 +355,10 @@ pub struct RecurrencePattern {
 pub struct ScheduledSignal {
     pub id: u64,
     pub provider: Address,
-    pub signal_data: SignalData,
+    /// Versioned storage field — always written as V2 for new records.
+    /// Legacy V1 records are upgraded transparently via
+    /// [`VersionedSignalData::resolve`] (Issue #568).
+    pub signal_data: VersionedSignalData,
     pub publish_at: u64,
     pub recurrence: RecurrencePattern,
     pub status: ScheduleStatus,

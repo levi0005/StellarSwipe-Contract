@@ -22,6 +22,8 @@ pub mod rate_limit;
 pub mod replay_protection;
 pub mod ttl_manager;
 pub mod budget_regression;
+/// Generic CRUD helpers to replace per-contract storage boilerplate (Issue #579).
+pub mod storage_crud;
 
 pub use amm_bridge::{
     build_fallback_chain, emit_fallback_used, emit_quote_discovered, emit_route_planned,
@@ -70,6 +72,9 @@ pub use rate_limit::{
 pub use replay_protection::{current_nonce, verify_and_commit, ReplayError};
 pub use retry_backoff::{
     has_remaining_attempts, next_retry_state, should_retry, RetryConfig, RetryState,
+};
+pub use storage_crud::{
+    crud_get, crud_get_or, crud_get_or_default, crud_has, crud_remove, crud_set, StorageTier,
 };
 
 #[cfg(test)]

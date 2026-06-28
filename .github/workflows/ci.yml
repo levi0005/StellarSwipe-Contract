@@ -124,6 +124,26 @@ jobs:
           fi
           echo "Embedded SourceHash: $STELLAR_SOURCE_HASH"
 
+      # Diff each contract's exported function names and contract-spec hash
+      # against the committed baselines in abi-baselines/.
+      # Exit 0 = clean; exit 2 = new exports added (baseline updated, commit
+      # the JSON files); exit 1 = breaking change (removed export or changed
+      # parameter signature) → fail the build unless
+      # abi-baselines/<contract>.breaking.txt is present.
+      - name: Check WASM ABI exports for breaking changes
+        run: |
+          python3 stellar-swipe/scripts/check_wasm_exports.py \
+            --wasm-dir stellar-swipe/target/wasm-optimized
+          rc=$?
+          if [ $rc -eq 1 ]; then
+            echo "ERROR: Breaking ABI change detected — see output above." >&2
+            exit 1
+          fi
+          if [ $rc -eq 2 ]; then
+            echo "INFO: New exports found; abi-baselines/*.json updated."
+            echo "Please commit the updated stellar-swipe/abi-baselines/*.json files."
+          fi
+
       - name: Upload optimized WASM artifacts
         uses: actions/upload-artifact@v4
         with:
