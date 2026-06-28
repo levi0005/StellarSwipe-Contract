@@ -93,3 +93,94 @@ pub fn is_rate_limited(env: &Env, user: &Address) -> bool {
         None => false,
     }
 }
+
+// ── Loss-streak pause (Issue #698) ────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LossStreakCounter {
+    pub consecutive_losses: u32,
+    pub updated_at: u64,
+}
+
+impl Default for LossStreakCounter {
+    fn default() -> Self {
+        Self {
+            consecutive_losses: 0,
+            updated_at: 0,
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LossStreakConfig {
+    /// Number of consecutive losing auto-trades that trigger an automatic pause.
+    pub threshold: u32,
+}
+
+impl Default for LossStreakConfig {
+    fn default() -> Self {
+        Self { threshold: 5 }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LossStreakKey {
+    Counter(Address),
+    Config,
+    /// Whether auto-trading is paused due to loss-streak for a user.
+    Paused(Address),
+}
+
+/// Get the per-user consecutive-loss counter.
+pub fn get_loss_streak_counter(env: &Env, user: &Address) -> LossStreakCounter {
+    env.storage()
+        .persistent()
+        .get(&LossStreakKey::Counter(user.clone()))
+        .unwrap_or_default()
+}
+
+/// Set the per-user consecutive-loss counter.
+pub fn set_loss_streak_counter(env: &Env, user: &Address, counter: &LossStreakCounter) {
+    env.storage()
+        .persistent()
+        .set(&LossStreakKey::Counter(user.clone()), counter);
+}
+
+/// Get the loss-streak threshold config.
+pub fn get_loss_streak_config(env: &Env) -> LossStreakConfig {
+    env.storage()
+        .instance()
+        .get(&LossStreakKey::Config)
+        .unwrap_or_default()
+}
+
+/// Set the loss-streak threshold config (admin only).
+pub fn set_loss_streak_config(env: &Env, config: &LossStreakConfig) {
+    env.storage()
+        .instance()
+        .set(&LossStreakKey::Config, config);
+}
+
+/// Whether the user is currently paused due to a loss-streak.
+pub fn is_loss_streak_paused(env: &Env, user: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .has(&LossStreakKey::Paused(user.clone()))
+}
+
+/// Mark a user as paused due to loss-streak.
+pub fn set_loss_streak_paused(env: &Env, user: &Address) {
+    env.storage()
+        .persistent()
+        .set(&LossStreakKey::Paused(user.clone()), &true);
+}
+
+/// Clear the loss-streak pause for a user.
+pub fn clear_loss_streak_paused(env: &Env, user: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&LossStreakKey::Paused(user.clone()));
+}

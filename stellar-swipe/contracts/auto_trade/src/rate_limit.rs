@@ -1,7 +1,21 @@
+//! Bridge transfer rate limiting.
+//!
+//! The hourly/daily *count* limits below are enforced via [`shared::rate_limiter`],
+//! the single shared rate-limiter consolidated in Issue #595 (previously this
+//! tracked counts itself by re-deriving them from `transfers_last_hour`/`_day`).
+//! Volume limits stay bespoke here since the shared limiter only tracks counts,
+//! not per-action amounts.
+
 #![allow(dead_code)]
+use shared::rate_limiter;
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 use crate::errors::AutoTradeError;
+
+const HOURLY_USE_CASE: Symbol = symbol_short!("bridge_hr");
+const DAILY_USE_CASE: Symbol = symbol_short!("bridge_dy");
+const HOUR_SECS: u64 = 3600;
+const DAY_SECS: u64 = 86400;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -278,8 +292,10 @@ pub fn check_rate_limits(env: &Env, user: &Address, amount: i128) -> Result<(), 
 
     prune_old_records(env, &mut history, now);
 
-    // Hourly count
-    if history.transfers_last_hour.len() as u32 >= limits.per_user_hourly_transfers {
+    // Hourly count (shared rate limiter)
+    if rate_limiter::check(env, &HOURLY_USE_CASE, user, HOUR_SECS, limits.per_user_hourly_transfers)
+        .is_err()
+    {
         return Err(AutoTradeError::HourlyTransferLimitExceeded);
     }
 
@@ -294,8 +310,10 @@ pub fn check_rate_limits(env: &Env, user: &Address, amount: i128) -> Result<(), 
         return Err(AutoTradeError::HourlyVolumeLimitExceeded);
     }
 
-    // Daily count
-    if history.transfers_last_day.len() as u32 >= limits.per_user_daily_transfers {
+    // Daily count (shared rate limiter)
+    if rate_limiter::check(env, &DAILY_USE_CASE, user, DAY_SECS, limits.per_user_daily_transfers)
+        .is_err()
+    {
         return Err(AutoTradeError::DailyTransferLimitExceeded);
     }
 
@@ -326,6 +344,8 @@ pub fn record_transfer(env: &Env, user: &Address, amount: i128) {
     let mut history = get_history(env, user);
 
     prune_old_records(env, &mut history, now);
+    rate_limiter::record(env, &HOURLY_USE_CASE, user, HOUR_SECS);
+    rate_limiter::record(env, &DAILY_USE_CASE, user, DAY_SECS);
 
     let record = TransferRecord {
         timestamp: now,

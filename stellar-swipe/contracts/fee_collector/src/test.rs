@@ -1311,4 +1311,95 @@ fn test_audit_balances_limit_over_limit() {
     assert_eq!(result, Err(Ok(ContractError::IterationLimitExceeded)));
 }
 
+// ── Issue #563: require_auth_for_args ─────────────────────────────────────
+
+/// A valid claim_fees auth for (provider, token_A) must be rejected when the
+/// caller substitutes token_B — demonstrating that require_auth_for_args
+/// scopes the signature to the exact (provider, token) pair.
+#[test]
+fn test_claim_fees_arg_scoped_auth_rejects_substituted_token() {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
+
+    let env = Env::default();
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    let token_a = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    let token_b = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    // Provider signs for (provider, token_a) but the call targets token_b.
+    let sub_invokes: &[MockAuthInvoke] = &[];
+    let mock_invoke = MockAuthInvoke {
+        contract: &contract_id,
+        fn_name: "claim_fees",
+        args: (&provider, &token_a).into_val(&env),
+        sub_invokes,
+    };
+    let mock_auth = MockAuth {
+        address: &provider,
+        invoke: &mock_invoke,
+    };
+
+    // The call uses token_b but the auth only covers token_a — must fail.
+    let result = client
+        .mock_auths(&[mock_auth])
+        .try_claim_fees(&provider, &token_b);
+
+    assert!(
+        result.is_err(),
+        "auth scoped to token_a must not authorize a claim for token_b"
+    );
+}
+
+/// A valid claim_fees auth scoped to the correct (provider, token) succeeds.
+#[test]
+fn test_claim_fees_arg_scoped_auth_passes_for_correct_args() {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
+
+    let env = Env::default();
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    let token = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    // Auth exactly matches the call arguments.
+    let sub_invokes: &[MockAuthInvoke] = &[];
+    let mock_invoke = MockAuthInvoke {
+        contract: &contract_id,
+        fn_name: "claim_fees",
+        args: (&provider, &token).into_val(&env),
+        sub_invokes,
+    };
+    let mock_auth = MockAuth {
+        address: &provider,
+        invoke: &mock_invoke,
+    };
+
+    let result = client
+        .mock_auths(&[mock_auth])
+        .try_claim_fees(&provider, &token);
+
+    assert!(result.is_ok(), "correctly scoped auth must succeed");
+}
+
 

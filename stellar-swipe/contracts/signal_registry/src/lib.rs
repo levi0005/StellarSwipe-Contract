@@ -7,6 +7,7 @@ static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 mod admin;
 mod analytics;
 mod categories;
+mod churn_risk;
 mod collaboration;
 mod combos;
 mod community_voting;
@@ -65,8 +66,8 @@ use community_voting::{
 };
 use contests::{Contest, ContestEntry, ContestMetric, ContestStatus};
 use errors::{
-    AdminError, AiScoreError, ComboError, ContestError, CrossChainError, SignalEditError,
-    SignalOutcomeError, TemplateError, VersioningError,
+    AdminError, AiScoreError, ComboError, ContestError, CrossChainError, SignalCancelError,
+    SignalEditError, SignalOutcomeError, TemplateError, VersioningError,
 };
 pub use leaderboard::{
     get_leaderboard as get_leaderboard_internal, update_leaderboard_index, LeaderboardMetric,
@@ -98,6 +99,15 @@ use versioning::{CopyRecord, SignalVersion};
 const MAX_EXPIRY_SECONDS: u64 = SECONDS_PER_30_DAY_MONTH;
 const WARNING_WINDOW_LEDGERS: u64 = 720;
 
+soroban_sdk::contractmeta!(
+    key = "SourceHash",
+    val = env!("STELLAR_SOURCE_HASH")
+);
+soroban_sdk::contractmeta!(
+    key = "GitCommit",
+    val = env!("STELLAR_GIT_COMMIT")
+);
+
 #[contract]
 pub struct SignalRegistry;
 
@@ -112,6 +122,10 @@ pub enum StorageKey {
     MigrationCursor,
     /// Snapshot count of v1 keys at migration start (for `MigrationProgress.total_count`).
     MigrationV1TargetTotal,
+    /// Pre-migration invariant snapshot, captured at migration start (issue #597).
+    MigrationPreSnapshot,
+    /// Result of reconciling the pre-migration snapshot against migrated v2 data (issue #597).
+    MigrationVerification,
     ProviderStats,
     /// Per-provider stake balances for trust and submission gates.
     ProviderStakes,
@@ -138,6 +152,9 @@ pub enum StorageKey {
     RecordedSignalOutcomes,
     /// Rolling reputation score per provider (Issue #170).
     ProviderReputationScore(Address),
+    /// Minimum number of seconds a signal must remain active before the provider
+    /// may cancel it. Set by admin; 0 means no minimum (issue #687).
+    MinSignalLifetime,
 }
 #[contractimpl]
 impl SignalRegistry {
@@ -201,6 +218,14 @@ impl SignalRegistry {
         admin::require_admin(&env, &caller)?;
         caller.require_auth();
         migration::migrate_signals_v1_to_v2(&env, &caller, batch_size)
+    }
+
+    /// Result of the most recently completed v1→v2 migration's post-migration
+    /// invariant check (issue #597): `None` until a migration run has fully
+    /// drained v1 at least once; `verified: false` flags a reconciliation
+    /// mismatch that needs manual review.
+    pub fn get_migration_verification(env: Env) -> Option<migration::MigrationVerification> {
+        migration::get_migration_verification(&env)
     }
 
     /* =========================
@@ -1107,6 +1132,52 @@ impl SignalRegistry {
         Ok(())
     }
 
+    /// Edit signal with an append-only audit trail (Issue #686).
+    /// Stores a snapshot of the current signal state before applying changes,
+    /// creating a versioned history that can be retrieved via get_signal_version_history.
+    /// Only the original provider may edit, and only before any follower has
+    /// copy-traded the signal.
+    pub fn edit_signal_audit(
+        env: Env,
+        provider: Address,
+        signal_id: u64,
+        new_price: Option<i128>,
+        new_rationale: Option<soroban_sdk::String>,
+        new_expiry: Option<u64>,
+    ) -> Result<u32, SignalEditError> {
+        provider.require_auth();
+        admin::require_not_paused(&env, String::from_str(&env, CAT_SIGNALS))
+            .map_err(|_| SignalEditError::TradingPaused)?;
+
+        let mut signals = Self::get_signals_map(&env);
+        let mut signal = signals
+            .get(signal_id)
+            .ok_or(SignalEditError::SignalNotFound)?;
+
+        let new_version = versioning::edit_signal_with_audit(
+            &env,
+            signal_id,
+            &provider,
+            new_price,
+            new_rationale,
+            new_expiry,
+            &mut signal,
+        )?;
+
+        signals.set(signal_id, signal.clone());
+        Self::save_signals_map(&env, &signals);
+        Ok(new_version)
+    }
+
+    /// Retrieve the full version history for a signal (audit trail, Issue #686).
+    /// Returns all stored versions in chronological order.
+    pub fn get_signal_version_history(
+        env: Env,
+        signal_id: u64,
+    ) -> Vec<versioning::SignalVersion> {
+        versioning::get_signal_history(&env, signal_id)
+    }
+
     /// Record closed-signal outcome and update provider reputation (Issue #170).
     pub fn record_signal_outcome(
         env: Env,
@@ -1159,6 +1230,80 @@ impl SignalRegistry {
     pub fn get_provider_reputation_score(env: Env, provider: Address) -> u32 {
         let rep_key = StorageKey::ProviderReputationScore(provider);
         env.storage().instance().get(&rep_key).unwrap_or(50)
+    }
+
+    // ── Minimum signal lifetime (issue #687) ────────────────────────────────────
+
+    /// Admin: set the minimum number of seconds a signal must remain active
+    /// before the provider may cancel it. Set to 0 to disable the minimum.
+    pub fn set_min_signal_lifetime(
+        env: Env,
+        caller: Address,
+        min_lifetime_secs: u64,
+    ) -> Result<(), AdminError> {
+        admin::require_admin(&env, &caller)?;
+        caller.require_auth();
+        env.storage()
+            .instance()
+            .set(&StorageKey::MinSignalLifetime, &min_lifetime_secs);
+        Ok(())
+    }
+
+    /// Returns the configured minimum signal lifetime in seconds (0 if not set).
+    pub fn get_min_signal_lifetime(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&StorageKey::MinSignalLifetime)
+            .unwrap_or(0)
+    }
+
+    /// Provider-initiated cancellation of an active signal.
+    ///
+    /// Fails with [`SignalCancelError::LifetimeNotElapsed`] if the signal has not
+    /// yet been active for the admin-configured minimum lifetime. Natural expiry
+    /// is not affected — signals that pass their `expiry` timestamp are handled
+    /// separately by the expiry cleanup path and this restriction does not apply.
+    pub fn cancel_signal(
+        env: Env,
+        provider: Address,
+        signal_id: u64,
+    ) -> Result<(), SignalCancelError> {
+        provider.require_auth();
+
+        let mut signals = Self::get_signals_map(&env);
+        let mut signal = signals
+            .get(signal_id)
+            .ok_or(SignalCancelError::NotFound)?;
+
+        if signal.provider != provider {
+            return Err(SignalCancelError::NotOwner);
+        }
+
+        if signal.status != SignalStatus::Active {
+            return Err(SignalCancelError::NotActive);
+        }
+
+        let min_lifetime: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::MinSignalLifetime)
+            .unwrap_or(0);
+
+        let now = env.ledger().timestamp();
+        let elapsed = now.saturating_sub(signal.submitted_at);
+
+        if elapsed < min_lifetime {
+            return Err(SignalCancelError::LifetimeNotElapsed);
+        }
+
+        signal.status = SignalStatus::Cancelled;
+        signals.set(signal_id, signal);
+        Self::save_signals_map(&env, &signals);
+
+        validation::decrement_provider_active_count(&env, &provider);
+        events::emit_signal_cancelled(&env, signal_id, provider);
+
+        Ok(())
     }
 
     /// Provider appeals an open community-voting dispute against them (Issue #539).
@@ -1951,6 +2096,21 @@ impl SignalRegistry {
         analytics::calculate_global_analytics(&env, &signals)
     }
 
+    /// Budget-aware, resumable version of `get_global_analytics` (issue #598).
+    /// Pass `cursor: None` and `accumulator: None` on the first call; if the
+    /// returned `cursor` is `Some`, pass it (and the returned accumulator)
+    /// back in to continue from where the previous call left off instead of
+    /// risking a mid-query instruction-budget failure on large datasets.
+    pub fn get_global_analytics_paginated(
+        env: Env,
+        cursor: Option<u64>,
+        accumulator: Option<analytics::GlobalAnalyticsAccumulator>,
+    ) -> analytics::PagedGlobalAnalytics {
+        let signals = Self::get_signals_map(&env);
+        let acc = accumulator.unwrap_or_else(analytics::GlobalAnalyticsAccumulator::new);
+        analytics::calculate_global_analytics_paginated(&env, &signals, cursor, acc)
+    }
+
     /// Get category-level performance analytics (Issue #419)
     /// Returns analytics for the given category, including avg success rate,
     /// avg ROI, total signals, total adopters, and top provider.
@@ -1961,6 +2121,45 @@ impl SignalRegistry {
     ) -> analytics::CategoryAnalytics {
         let signals = Self::get_signals_map(&env);
         analytics::calculate_category_analytics(&env, &signals, &category)
+    }
+
+    // ── Churn-risk scoring (Issue #churn) ────────────────────────────────────
+
+    /// Read-only: compute the churn-risk score for a provider.
+    ///
+    /// Combines trailing signal-frequency decline (40 %), follower-unsubscribe
+    /// rate (30 %), and performance trend (30 %) into a composite 0–100 score.
+    /// Emits `churn_risk_elevated` when the composite score meets or exceeds the
+    /// admin-configured threshold.
+    pub fn get_provider_churn_risk(
+        env: Env,
+        provider: Address,
+    ) -> churn_risk::ChurnRiskScore {
+        let signals = Self::get_signals_map(&env);
+        let stats_map = Self::get_provider_stats_map(&env);
+        let stats = stats_map.get(provider.clone());
+        churn_risk::get_provider_churn_risk(&env, &provider, &signals, stats.as_ref())
+    }
+
+    /// Admin: set the composite-score threshold above which `churn_risk_elevated`
+    /// is emitted. Valid range 0–100. Default is 67 (high-risk boundary).
+    pub fn set_churn_risk_threshold(
+        env: Env,
+        caller: Address,
+        threshold: u32,
+    ) -> Result<(), AdminError> {
+        admin::require_admin(&env, &caller)?;
+        caller.require_auth();
+        if threshold > 100 {
+            return Err(AdminError::InvalidParameter);
+        }
+        churn_risk::set_churn_threshold(&env, threshold);
+        Ok(())
+    }
+
+    /// Admin: get the current churn-risk threshold.
+    pub fn get_churn_risk_threshold(env: Env) -> u32 {
+        churn_risk::get_churn_threshold(&env)
     }
 
     /* =========================

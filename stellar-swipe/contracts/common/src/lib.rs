@@ -2,7 +2,10 @@
 
 #[allow(deprecated)]
 pub mod amm_bridge;
+pub mod retry_backoff;
 pub mod assets;
+/// Checked-arithmetic wrapper for financial amounts (issue #599).
+pub mod checked_amount;
 pub mod commit_reveal;
 pub mod constants;
 pub mod emergency;
@@ -10,6 +13,8 @@ pub mod health;
 #[allow(deprecated)]
 pub mod multisig;
 pub mod oracle;
+/// Structured panic message convention for intentional panics (issue #596).
+pub mod panic_codes;
 pub mod perf;
 #[allow(deprecated)]
 pub mod rate_limit;
@@ -23,7 +28,10 @@ pub use amm_bridge::{
     AmmRouteSegment, AmmSourceConfig, AmmSourceKind, BPS_DENOMINATOR, FN_GET_BEST_ASK, FN_SWAP,
 };
 pub use assets::{validate_asset_pair, Asset, AssetPair, AssetPairError};
-pub use commit_reveal::{constant_time_eq, hash_trade_intent, verify_commitment};
+pub use commit_reveal::{
+    constant_time_eq, forfeit_expired, hash_trade_intent, reveal_and_clear, store_commitment,
+    verify_commitment, CommitKey, CommitRecord, CommitRevealError,
+};
 pub use constants::{
     BASIS_POINTS_DENOMINATOR, BASIS_POINTS_DENOMINATOR_I128, CAT_ALL, CAT_SIGNALS, CAT_STAKES,
     CAT_TRADING, LEDGERS_PER_30_DAY_MONTH, LEDGERS_PER_DAY, PLACEHOLDER_ADMIN_STR,
@@ -58,6 +66,9 @@ pub use rate_limit::{
     RateLimitConfig, RateLimitError,
 };
 pub use replay_protection::{current_nonce, verify_and_commit, ReplayError};
+pub use retry_backoff::{
+    has_remaining_attempts, next_retry_state, should_retry, RetryConfig, RetryState,
+};
 
 #[cfg(test)]
 mod storage_key_tests;

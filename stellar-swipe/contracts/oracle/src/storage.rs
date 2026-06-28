@@ -36,6 +36,8 @@ pub enum StorageKey {
     /// Compact list instead of `Map<AssetPair, bool>` — avoids map overhead
     PairsList,
     ConversionCache(Asset, Asset),
+    /// Native decimal precision for an asset pair (e.g. 6 for USDC, 7 for XLM).
+    FeedDecimals(AssetPair),
 }
 
 // ── Cached conversion ─────────────────────────────────────────────────────────
@@ -142,6 +144,56 @@ pub fn set_cached_conversion(env: &Env, from: &Asset, to: &Asset, rate: i128) {
     };
     env.storage().temporary().set(&key, &cached);
     env.storage().temporary().extend_ttl(&key, 60, 60);
+}
+
+// ── Feed decimals ─────────────────────────────────────────────────────────────
+
+/// Store the native decimal precision for an asset pair.
+/// `decimals` is the number of decimal places in the raw price value
+/// (e.g. 6 for USDC-priced feeds, 7 for XLM-denominated feeds).
+pub fn set_feed_decimals(env: &Env, pair: &AssetPair, decimals: u32) {
+    let key = StorageKey::FeedDecimals(pair.clone());
+    env.storage().persistent().set(&key, &decimals);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+}
+
+/// Retrieve stored decimal precision for an asset pair.
+/// Returns `None` if no decimals have been configured.
+pub fn get_feed_decimals(env: &Env, pair: &AssetPair) -> Option<u32> {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::FeedDecimals(pair.clone()))
+}
+
+/// Rescale `raw_price` from `from_decimals` to `to_decimals`.
+///
+/// Uses integer-only arithmetic to stay inside `no_std`:
+/// - If `to_decimals > from_decimals` the price is multiplied by 10^(diff).
+/// - If `to_decimals < from_decimals` the price is divided by 10^(diff).
+/// - Returns `None` on overflow.
+pub fn rescale_price(raw_price: i128, from_decimals: u32, to_decimals: u32) -> Option<i128> {
+    if from_decimals == to_decimals {
+        return Some(raw_price);
+    }
+    if to_decimals > from_decimals {
+        let diff = to_decimals - from_decimals;
+        let factor = pow10(diff)?;
+        raw_price.checked_mul(factor)
+    } else {
+        let diff = from_decimals - to_decimals;
+        let factor = pow10(diff)?;
+        Some(raw_price / factor)
+    }
+}
+
+fn pow10(exp: u32) -> Option<i128> {
+    let mut result: i128 = 1;
+    for _ in 0..exp {
+        result = result.checked_mul(10)?;
+    }
+    Some(result)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

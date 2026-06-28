@@ -38,7 +38,8 @@ use storage::{
     MAX_BURN_RATE_BPS, MAX_FEE_RATE_BPS, MIN_FEE_RATE_BPS,
 };
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, IntoVal, String, Val,
+    Vec};
 
 use shared::errors::{ErrorCategory, RecoveryStrategy};
 use stellar_swipe_common::Asset;
@@ -76,6 +77,15 @@ pub struct BatchFeeInput {
     pub trade_amount: i128,
     pub trade_asset: Asset,
 }
+
+soroban_sdk::contractmeta!(
+    key = "SourceHash",
+    val = env!("STELLAR_SOURCE_HASH")
+);
+soroban_sdk::contractmeta!(
+    key = "GitCommit",
+    val = env!("STELLAR_GIT_COMMIT")
+);
 
 #[contract]
 pub struct FeeCollector;
@@ -488,6 +498,9 @@ impl FeeCollector {
     }
 
     /// Retry a previously queued fee collection request.
+    ///
+    /// Uses the shared `stellar_swipe_common::retry_backoff` helper for
+    /// exponential backoff and attempt counting (Issue #699).
     pub fn retry_failed_fee_collection(
         env: Env,
         admin: Address,
@@ -501,12 +514,25 @@ impl FeeCollector {
         let failed =
             get_failed_fee_collection(&env, &id).ok_or(ContractError::FailedCollectionNotFound)?;
 
-        if failed.retry_count >= get_fee_optimization_config(&env).max_retry_attempts {
+        let config = get_fee_optimization_config(&env);
+        let retry_config = stellar_swipe_common::retry_backoff::RetryConfig {
+            max_attempts: config.max_retry_attempts,
+            base_delay_ledgers: 5,   // ~25 seconds at 5s/ledger
+            max_delay_ledgers: Some(200), // ~16 minutes max
+        };
+        let retry_state = stellar_swipe_common::retry_backoff::RetryState {
+            attempt: failed.retry_count,
+        };
+
+        // Use shared helper to check if retry is allowed
+        if stellar_swipe_common::retry_backoff::should_retry(&retry_state, &retry_config).is_none()
+        {
             return Err(ContractError::RetryLimitExceeded);
         }
 
         let mut retry_record = failed.clone();
-        retry_record.retry_count = retry_record.retry_count.saturating_add(1);
+        let next = stellar_swipe_common::retry_backoff::next_retry_state(&retry_state);
+        retry_record.retry_count = next.attempt;
         set_failed_fee_collection(&env, &retry_record);
 
         let result = Self::collect_fee_with_recovery(
@@ -728,11 +754,19 @@ impl FeeCollector {
 
     /// Claim all pending fee earnings for a provider and token.
     /// Returns the amount claimed (0 if no pending balance).
+    /// Claim accumulated fees for `provider` in `token`.
+    ///
+    /// Authorization is scoped to `(provider, token)` via `require_auth_for_args`
+    /// so a valid signature cannot be replayed against a different token or
+    /// redirected to a different provider (Issue #563).
     pub fn claim_fees(env: Env, provider: Address, token: Address) -> Result<i128, ContractError> {
         if !is_initialized(&env) {
             return Err(ContractError::NotInitialized);
         }
-        provider.require_auth();
+        let mut auth_args: Vec<Val> = Vec::new(&env);
+        auth_args.push_back(provider.clone().into_val(&env));
+        auth_args.push_back(token.clone().into_val(&env));
+        provider.require_auth_for_args(auth_args);
 
         let amount = get_pending_fees(&env, &provider, &token);
 

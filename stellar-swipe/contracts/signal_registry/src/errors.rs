@@ -169,6 +169,8 @@ pub enum ContestError {
     NotQualified = 805,
     TradingPaused = 806,
     CircuitBreakerTriggered = 807,
+    /// Finalization was attempted before the committed randomness ledger is reached.
+    RandomnessNotAvailable = 808,
 }
 
 #[contracterror]
@@ -233,4 +235,19 @@ pub enum SubmissionError {
     DuplicateSignal = 1205,
     MissingRationale = 1206,
     PriceUnreasonable = 1207,
+}
+
+/// Errors returned by `cancel_signal` (issue #687).
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum SignalCancelError {
+    /// Signal does not exist.
+    NotFound = 1300,
+    /// Caller is not the signal provider.
+    NotOwner = 1301,
+    /// Signal is not in Active state and cannot be cancelled.
+    NotActive = 1302,
+    /// The configured minimum signal lifetime has not yet elapsed; cancellation rejected.
+    LifetimeNotElapsed = 1303,
 }

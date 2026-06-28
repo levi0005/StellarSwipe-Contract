@@ -49,3 +49,31 @@ Both should pass with no manual fixes required.
 
 Extend `DataKey` and `{ContractName}Error` with your contract-specific variants
 before adding business logic.
+
+## Checked arithmetic for financial amounts
+
+Financial amounts (fees, P&L, balances, stakes — anything denominated in a
+Stellar 7-decimal `i128`) must not use raw `+`, `-`, `*`, `/` operators, since
+those panic on overflow in debug builds and wrap or panic unpredictably
+otherwise (Soroban release profile sets `overflow-checks = true`).
+
+Use `stellar_swipe_common::Amount` instead:
+
+```rust
+use stellar_swipe_common::Amount;
+
+let total = Amount::new(a).checked_add(Amount::new(b))?; // Result<Amount, AmountError>
+let fee = principal.checked_mul_rate(fee_bps, 10_000)?;   // principal * fee_bps / 10_000
+```
+
+`Amount` intentionally has no `Add`/`Sub`/`Mul`/`Div` impls, so attempting
+`amount_a + amount_b` is a compile error. Functions that perform financial
+arithmetic should additionally carry `#[warn(clippy::arithmetic_side_effects)]`
+on the function item — CI runs `cargo clippy --workspace --all-targets -- -D
+warnings`, so any raw arithmetic introduced inside that function fails the
+build (see `contracts/fee_collector/src/rebates.rs::record_trade_volume` and
+`contracts/user_portfolio/src/queries.rs::compute_get_pnl` for examples).
+
+This is scoped per-function rather than per-crate because the workspace sets
+`clippy::all = "allow"` broadly (issue #599) — a crate-wide deny would also
+flag unrelated, already-safe loop/index arithmetic across these large crates.

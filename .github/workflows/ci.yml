@@ -49,13 +49,26 @@ jobs:
       - name: Format check
         run: cd stellar-swipe && cargo fmt --all -- --check
 
-      # Clippy linter for all workspace crates
+      # Clippy: any warning is a build failure.
+      # Workspace-level suppressions live in [workspace.lints.clippy] in Cargo.toml
+      # and must be narrowly scoped with a documented reason.  Adding a new
+      # suppress without justification is grounds for PR rejection.
       - name: Clippy
         run: cd stellar-swipe && cargo clippy --workspace --all-targets -- -D warnings
 
       # Run tests for all workspace crates
       - name: Tests
         run: cd stellar-swipe && cargo test --workspace --all-targets
+
+      # Supply-chain: license, banned crates, source restrictions, advisories.
+      # Policy lives in stellar-swipe/deny.toml.  Any violation fails the build.
+      # To request a new dependency or policy exception see CONTRIBUTING.md.
+      - name: cargo-deny (license / ban / source / advisory check)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: stellar-swipe/Cargo.toml
+          command: check
+          arguments: --all-features
 
       # Audit dependency versions consistency
       - name: Audit workspace dependencies
@@ -64,6 +77,22 @@ jobs:
       # Verify #![no_std] compliance of contract crates
       - name: Verify #![no_std] compliance
         run: python3 stellar-swipe/scripts/verify_no_std.py
+
+      # Guard against renumbering or reusing #[contracterror] discriminants.
+      # Exit 0 = clean; exit 2 = new codes added (baseline updated, commit the
+      # JSON files); exit 1 = renumbering/reuse detected → fail the build.
+      - name: Check error code baselines
+        run: |
+          python3 stellar-swipe/scripts/check_error_codes.py
+          rc=$?
+          if [ $rc -eq 1 ]; then
+            echo "ERROR: error code violation detected — see output above." >&2
+            exit 1
+          fi
+          if [ $rc -eq 2 ]; then
+            echo "INFO: new error codes added; baseline files updated."
+            echo "Please commit the updated stellar-swipe/error-baselines/*.json files."
+          fi
 
       # Release WASM (workspace [profile.release]) + stellar contract optimize
       # Prebuilt release binary — avoids compiling libdbus-sys from source via cargo install
@@ -80,8 +109,20 @@ jobs:
           chmod +x "$install_dir/stellar"
           stellar --version
 
-      - name: Build optimized Soroban WASM
-        run: cd stellar-swipe && chmod +x scripts/build.sh && ./scripts/build.sh
+      - name: Build optimized Soroban WASM (with source hash)
+        run: |
+          cd stellar-swipe
+          chmod +x scripts/embed_source_hash.sh scripts/build.sh
+          # embed_source_hash.sh exports STELLAR_SOURCE_HASH; build.sh verifies
+          # it is non-empty before proceeding.  The build fails if the hash
+          # cannot be computed (missing git history, empty workspace, etc.).
+          source scripts/embed_source_hash.sh
+          ./scripts/build.sh
+          if [[ -z "${STELLAR_SOURCE_HASH:-}" ]]; then
+            echo "error: STELLAR_SOURCE_HASH was not set — release aborted." >&2
+            exit 1
+          fi
+          echo "Embedded SourceHash: $STELLAR_SOURCE_HASH"
 
       - name: Upload optimized WASM artifacts
         uses: actions/upload-artifact@v4

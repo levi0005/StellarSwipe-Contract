@@ -1,6 +1,6 @@
 use crate::types::{ProviderPerformance, Signal, SignalAction, SignalStatus, TradeExecution};
 use soroban_sdk::Env;
-use stellar_swipe_common::BASIS_POINTS_DENOMINATOR_I128;
+use stellar_swipe_common::{structured_panic, BASIS_POINTS_DENOMINATOR_I128};
 
 /// ROI calculation constants
 const SUCCESS_THRESHOLD_BPS: i128 = 200; // 2% in basis points
@@ -18,10 +18,11 @@ const MIN_ROI_BPS: i128 = -BASIS_POINTS_DENOMINATOR_I128; // -100% cap
 /// ROI in basis points (10000 = 100%). Capped at -100% minimum.
 ///
 /// # Panics
-/// Panics if entry_price is 0 (division by zero)
+/// Panics with structured code `SSW-9100` if entry_price is 0 (division by
+/// zero) — see `stellar_swipe_common::structured_panic!` (issue #596).
 pub fn calculate_roi(entry_price: i128, exit_price: i128, action: &SignalAction) -> i128 {
     if entry_price == 0 {
-        panic!("entry price cannot be zero");
+        structured_panic!(9100, "entry price cannot be zero");
     }
 
     // Calculate price difference based on action

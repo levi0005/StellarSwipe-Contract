@@ -348,3 +348,104 @@ fn signal_ids_are_unique_and_increasing() {
     assert!(id1 < id2);
     assert!(id2 < id3);
 }
+
+// ── Minimum signal lifetime tests (issue #687) ────────────────────────────────
+
+use crate::errors::SignalCancelError;
+
+/// Cancel before minimum lifetime elapses → LifetimeNotElapsed.
+#[test]
+fn cancel_before_min_lifetime_rejected() {
+    let (env, admin, client) = setup();
+    let provider = Address::generate(&env);
+
+    client.set_min_signal_lifetime(&admin, &3_600u64);
+    let id = create_signal(&env, &client, &provider, 86_400);
+
+    // Advance only 1 800 seconds — half the required lifetime.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 1_800);
+
+    let result = client.try_cancel_signal(&provider, &id);
+    assert_eq!(result, Err(Ok(SignalCancelError::LifetimeNotElapsed)));
+    assert_eq!(
+        client.get_signal(&id).unwrap().status,
+        SignalStatus::Active,
+        "signal must remain active on rejection"
+    );
+}
+
+/// Cancel exactly at the minimum lifetime boundary → succeeds.
+#[test]
+fn cancel_at_min_lifetime_boundary_succeeds() {
+    let (env, admin, client) = setup();
+    let provider = Address::generate(&env);
+
+    client.set_min_signal_lifetime(&admin, &3_600u64);
+    let id = create_signal(&env, &client, &provider, 86_400);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 3_600);
+
+    client.cancel_signal(&provider, &id);
+    assert_eq!(
+        client.get_signal(&id).unwrap().status,
+        SignalStatus::Cancelled
+    );
+}
+
+/// Cancel after the minimum lifetime has elapsed → succeeds.
+#[test]
+fn cancel_after_min_lifetime_succeeds() {
+    let (env, admin, client) = setup();
+    let provider = Address::generate(&env);
+
+    client.set_min_signal_lifetime(&admin, &3_600u64);
+    let id = create_signal(&env, &client, &provider, 86_400);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 7_200);
+
+    client.cancel_signal(&provider, &id);
+    assert_eq!(
+        client.get_signal(&id).unwrap().status,
+        SignalStatus::Cancelled
+    );
+}
+
+/// Natural expiry proceeds even when the signal is within the minimum lifetime window.
+#[test]
+fn natural_expiry_allowed_within_min_lifetime_window() {
+    let (env, admin, client) = setup();
+    let provider = Address::generate(&env);
+
+    // Minimum lifetime is 24 h but signal expires in 10 s.
+    client.set_min_signal_lifetime(&admin, &86_400u64);
+    let id = create_signal(&env, &client, &provider, 10);
+
+    // Advance past the signal's expiry (but NOT past the min lifetime).
+    env.ledger().set_timestamp(env.ledger().timestamp() + 11);
+    client.cleanup_expired_signals(&10);
+
+    assert_eq!(
+        client.get_signal(&id).unwrap().status,
+        SignalStatus::Expired,
+        "natural expiry must succeed regardless of minimum lifetime"
+    );
+}
+
+/// Cancel with no minimum set (0) → always succeeds immediately.
+#[test]
+fn cancel_with_no_minimum_lifetime_always_succeeds() {
+    let (env, _, client) = setup();
+    let provider = Address::generate(&env);
+
+    assert_eq!(client.get_min_signal_lifetime(), 0);
+    let id = create_signal(&env, &client, &provider, 86_400);
+
+    client.cancel_signal(&provider, &id);
+    assert_eq!(
+        client.get_signal(&id).unwrap().status,
+        SignalStatus::Cancelled
+    );
+}

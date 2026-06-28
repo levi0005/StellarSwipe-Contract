@@ -110,6 +110,15 @@ fn compute_snapshot_checksum(s: &ProtocolSnapshot) -> u64 {
     h
 }
 
+soroban_sdk::contractmeta!(
+    key = "SourceHash",
+    val = env!("STELLAR_SOURCE_HASH")
+);
+soroban_sdk::contractmeta!(
+    key = "GitCommit",
+    val = env!("STELLAR_GIT_COMMIT")
+);
+
 #[contract]
 pub struct AnalyticsContract;
 

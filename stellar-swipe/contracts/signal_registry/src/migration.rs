@@ -6,10 +6,12 @@ use crate::categories;
 use crate::categories::{RiskLevel, SignalCategory};
 use crate::contests;
 use crate::errors::AdminError;
-use crate::events::emit_migration_progress;
+use crate::events::{
+    emit_migration_progress, emit_migration_verification_failed, emit_migration_verified,
+};
 use crate::types::{MigrationProgress, Signal, SignalAction, SignalStatus, SignalV1};
 use crate::StorageKey;
-use soroban_sdk::{Address, Env, Map, String, Vec};
+use soroban_sdk::{contracttype, Address, Env, Map, String, Vec};
 
 const MAX_MIGRATION_BATCH: u32 = 256;
 
@@ -94,7 +96,7 @@ fn set_migration_v1_target_total(env: &Env, n: u32) {
 }
 
 /// Counts legacy rows with id in 1..=max_id. Bounded by the instance signal counter.
-fn count_v1_keys(_env: &Env, v1: &Map<u64, SignalV1>, max_id: u64) -> u32 {
+fn count_v1_keys(v1: &Map<u64, SignalV1>, max_id: u64) -> u32 {
     if max_id == 0 {
         return 0;
     }
@@ -107,6 +109,108 @@ fn count_v1_keys(_env: &Env, v1: &Map<u64, SignalV1>, max_id: u64) -> u32 {
         i = i.saturating_add(1);
     }
     c
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Issue #597: Post-migration invariant checksum verification
+// ═══════════════════════════════════════════════════════════════════
+//
+// `migrate_signals_v1_to_v2` moves records in bounded batches; nothing
+// previously confirmed that the migrated v2 data actually reconciles with
+// the v1 data it replaced. This snapshots aggregate invariants (record
+// count + sum of `total_volume`) over the v1 scope when migration starts,
+// recomputes the same aggregates over the migrated v2 scope once v1 is
+// fully drained, and records whether they reconcile — automatically, as
+// part of this same migration helper, not a separate manual step.
+
+/// Aggregate invariants captured over a signal map, scoped to ids `1..=max_id`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationSnapshot {
+    pub record_count: u32,
+    pub total_volume_sum: i128,
+}
+
+/// Result of reconciling a pre-migration v1 snapshot against the
+/// post-migration v2 snapshot over the same id scope.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationVerification {
+    pub verified: bool,
+    pub pre: MigrationSnapshot,
+    pub post: MigrationSnapshot,
+}
+
+/// Sum of `total_volume` across legacy rows with id in 1..=max_id.
+fn sum_v1_total_volume(v1: &Map<u64, SignalV1>, max_id: u64) -> i128 {
+    let mut sum: i128 = 0;
+    let mut i: u64 = 1;
+    while i <= max_id {
+        if let Some(v) = v1.get(i) {
+            sum = sum.saturating_add(v.total_volume);
+        }
+        i = i.saturating_add(1);
+    }
+    sum
+}
+
+/// Snapshot the v1 scope (record count + total_volume sum) over ids `1..=max_id`.
+fn snapshot_v1(v1: &Map<u64, SignalV1>, max_id: u64) -> MigrationSnapshot {
+    MigrationSnapshot {
+        record_count: count_v1_keys(v1, max_id),
+        total_volume_sum: sum_v1_total_volume(v1, max_id),
+    }
+}
+
+/// Snapshot the migrated v2 scope (record count + total_volume sum) over ids `1..=max_id`.
+fn snapshot_v2(v2: &Map<u64, Signal>, max_id: u64) -> MigrationSnapshot {
+    let mut record_count: u32 = 0;
+    let mut total_volume_sum: i128 = 0;
+    let mut i: u64 = 1;
+    while i <= max_id {
+        if let Some(s) = v2.get(i) {
+            record_count = record_count.saturating_add(1);
+            total_volume_sum = total_volume_sum.saturating_add(s.total_volume);
+        }
+        i = i.saturating_add(1);
+    }
+    MigrationSnapshot {
+        record_count,
+        total_volume_sum,
+    }
+}
+
+/// Pure reconciliation: compares a pre-migration and post-migration snapshot
+/// of the same scope and reports whether they reconcile.
+fn reconcile(pre: MigrationSnapshot, post: MigrationSnapshot) -> MigrationVerification {
+    let verified = pre == post;
+    MigrationVerification { verified, pre, post }
+}
+
+fn get_migration_pre_snapshot(env: &Env) -> Option<MigrationSnapshot> {
+    env.storage()
+        .instance()
+        .get(&StorageKey::MigrationPreSnapshot)
+}
+
+fn set_migration_pre_snapshot(env: &Env, snap: &MigrationSnapshot) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::MigrationPreSnapshot, snap);
+}
+
+fn set_migration_verification(env: &Env, v: &MigrationVerification) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::MigrationVerification, v);
+}
+
+/// Last recorded post-migration verification result, if any migration has
+/// completed since this contract version was deployed.
+pub fn get_migration_verification(env: &Env) -> Option<MigrationVerification> {
+    env.storage()
+        .instance()
+        .get(&StorageKey::MigrationVerification)
 }
 
 fn add_to_category_index(env: &Env, id: u64, category: SignalCategory) {
@@ -160,7 +264,7 @@ pub fn migrate_signals_v1_to_v2(
     }
 
     let v1 = get_v1_map(env);
-    if count_v1_keys(env, &v1, counter) == 0 {
+    if count_v1_keys(&v1, counter) == 0 {
         set_migration_cursor(env, counter.saturating_add(1));
         let tt = get_migration_v1_target_total(env).unwrap_or(0);
         emit_migration_progress(
@@ -174,7 +278,11 @@ pub fn migrate_signals_v1_to_v2(
     }
 
     if get_migration_v1_target_total(env).is_none() {
-        set_migration_v1_target_total(env, count_v1_keys(env, &v1, counter));
+        set_migration_v1_target_total(env, count_v1_keys(&v1, counter));
+        // Pre-migration invariant snapshot (issue #597), captured once at the
+        // very start of this migration run, over the same id scope used for
+        // the post-migration check below.
+        set_migration_pre_snapshot(env, &snapshot_v1(&v1, counter));
     }
     let target_total = get_migration_v1_target_total(env).unwrap_or(0);
 
@@ -212,8 +320,27 @@ pub fn migrate_signals_v1_to_v2(
     save_v2_map(env, &v2);
     set_migration_cursor(env, scan_to.saturating_add(1));
     if scan_to >= max_id {
-        if count_v1_keys(env, &v1, counter) == 0 {
+        if count_v1_keys(&v1, counter) == 0 {
             set_migration_cursor(env, max_id.saturating_add(1));
+
+            // Post-migration invariant verification (issue #597): v1 for this
+            // scope is now fully drained, so reconcile the pre-migration
+            // snapshot against the migrated v2 data over the same id range.
+            // Runs automatically here, as part of this same migration call —
+            // not a separate manual step. A mismatch does not panic (the
+            // already-migrated data is left in place for inspection); it is
+            // recorded via `MigrationVerification.verified = false` and an
+            // event, flagging the migration as requiring manual review/rollback.
+            if let Some(pre) = get_migration_pre_snapshot(env) {
+                let post = snapshot_v2(&v2, max_id);
+                let verification = reconcile(pre, post);
+                set_migration_verification(env, &verification);
+                if verification.verified {
+                    emit_migration_verified(env, verification.post.clone());
+                } else {
+                    emit_migration_verification_failed(env, verification.clone());
+                }
+            }
         }
     }
 
@@ -251,7 +378,7 @@ pub(crate) fn test_seed_v1_signals(env: &Env, count: u64) {
             status: SignalStatus::Active,
             executions: 0,
             successful_executions: 0,
-            total_volume: 0,
+            total_volume: (i as i128) * 100,
             total_roi: 0,
             category: SignalCategory::SWING,
             tags: Vec::new(env),
@@ -273,4 +400,90 @@ pub(crate) fn test_seed_v1_signals(env: &Env, count: u64) {
     env.storage()
         .instance()
         .remove(&StorageKey::MigrationV1TargetTotal);
+}
+
+#[cfg(test)]
+mod migration_invariant_tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    fn with_contract<R>(f: impl FnOnce(&Env) -> R) -> R {
+        let env = Env::default();
+        env.mock_all_auths();
+        #[allow(deprecated)]
+        let cid = env.register_contract(None, crate::SignalRegistry);
+        env.as_contract(&cid, || f(&env))
+    }
+
+    /// Clean migration: pre- and post-migration snapshots reconcile, and the
+    /// verification result reflects that (issue #597).
+    #[test]
+    fn clean_migration_reconciles() {
+        with_contract(|env| {
+            let admin = Address::generate(env);
+            test_seed_v1_signals(env, 37);
+
+            // 37 records, batches of 10 -> 4 calls to fully drain v1.
+            for _ in 0..4 {
+                migrate_signals_v1_to_v2(env, &admin, 10).unwrap();
+            }
+
+            let verification = get_migration_verification(env).expect("verification recorded");
+            assert!(verification.verified, "expected clean migration to reconcile: {verification:?}");
+            assert_eq!(verification.pre.record_count, 37);
+            assert_eq!(verification.post.record_count, 37);
+            assert_eq!(verification.pre.total_volume_sum, verification.post.total_volume_sum);
+            // Sum of (i * 100) for i in 1..=37
+            let expected_sum: i128 = (1..=37i128).map(|i| i * 100).sum();
+            assert_eq!(verification.pre.total_volume_sum, expected_sum);
+        });
+    }
+
+    /// Deliberately broken migration: a v1 record is corrupted (its
+    /// total_volume changed) after the pre-migration snapshot was captured
+    /// but before it gets migrated, simulating a migration-time data bug.
+    /// The post-migration verification must detect the mismatch rather than
+    /// silently reporting success (issue #597).
+    #[test]
+    fn deliberately_broken_migration_is_detected() {
+        with_contract(|env| {
+            let admin = Address::generate(env);
+            test_seed_v1_signals(env, 20);
+
+            // First batch captures the pre-migration snapshot over all 20
+            // records (target_total/pre-snapshot are only set once, on the
+            // first call), and migrates ids 1..=5.
+            migrate_signals_v1_to_v2(env, &admin, 5).unwrap();
+
+            // Corrupt an unmigrated v1 record's total_volume before it gets
+            // its turn to migrate.
+            let mut v1: Map<u64, SignalV1> = env
+                .storage()
+                .instance()
+                .get(&StorageKey::SignalsV1)
+                .unwrap();
+            let mut tampered = v1.get(15).expect("record 15 not yet migrated");
+            tampered.total_volume = tampered.total_volume.saturating_add(999_999);
+            v1.set(15, tampered);
+            env.storage().instance().set(&StorageKey::SignalsV1, &v1);
+
+            // Drain the rest.
+            for _ in 0..3 {
+                migrate_signals_v1_to_v2(env, &admin, 5).unwrap();
+            }
+
+            let verification = get_migration_verification(env).expect("verification recorded");
+            assert!(!verification.verified, "expected corrupted migration to be flagged as mismatched");
+            assert_eq!(verification.pre.record_count, verification.post.record_count);
+            assert_ne!(
+                verification.pre.total_volume_sum,
+                verification.post.total_volume_sum,
+                "corruption should have shifted the total_volume sum"
+            );
+            assert_eq!(
+                verification.post.total_volume_sum - verification.pre.total_volume_sum,
+                999_999
+            );
+        });
+    }
 }

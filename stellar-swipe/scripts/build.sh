@@ -53,6 +53,14 @@ if [[ "$compare" == true ]]; then
   cargo build --workspace --target "$TARGET"
 fi
 
+echo "==> Computing source hash and embedding into contract metadata..."
+# shellcheck source=scripts/embed_source_hash.sh
+source "$SCRIPT_DIR/scripts/embed_source_hash.sh"
+if [[ -z "${STELLAR_SOURCE_HASH:-}" ]]; then
+  echo "error: STELLAR_SOURCE_HASH is empty — aborting release build." >&2
+  exit 1
+fi
+
 echo "==> Building release WASM (workspace [profile.release]: opt-level=z, lto, strip, codegen-units=1)..."
 cargo build --workspace --target "$TARGET" --release
 

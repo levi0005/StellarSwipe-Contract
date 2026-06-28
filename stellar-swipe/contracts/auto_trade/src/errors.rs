@@ -75,6 +75,8 @@ pub enum AutoTradeError {
     // ── Misc ─────────────────────────────────────────────────────────────────
     LastOracleForPair = 49,
     NotPaused = 50,
+    // ── Loss-streak pause (Issue #698) ───────────────────────────────────────
+    LossStreakPaused = 51,
 }
 
 // ── Backward-compatible aliases ───────────────────────────────────────────────

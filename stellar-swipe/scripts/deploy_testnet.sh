@@ -111,6 +111,38 @@ is_initialized_flag() {
   [[ "$(jq -r --arg k "$logical" '.contracts[$k].initialized // false' "$STATE")" == "true" ]]
 }
 
+# invoke_init LOGICAL CONTRACT_ID [EXTRA_ARGS...]
+#
+# Runs `stellar contract invoke ... initialize [EXTRA_ARGS]` and records
+# success in the state file.  Treats an on-chain AlreadyInitialized response
+# as idempotent success so that interrupted re-runs complete cleanly instead
+# of aborting.  Any other failure is propagated as a fatal error.
+invoke_init() {
+  local logical="$1" cid="$2"
+  shift 2
+  local out rc=0
+  out="$(stellar contract invoke \
+    --id "$cid" \
+    --source-account "$SOURCE" \
+    --network "$NET" \
+    "${rpc_flags[@]}" \
+    -- \
+    initialize \
+    "$@" 2>&1)" || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    mark_initialized "$logical"
+    return 0
+  fi
+  # On-chain AlreadyInitialized is safe to treat as "already done".
+  if echo "$out" | grep -qiE 'AlreadyInitialized|already.initialized|already initialized'; then
+    echo "    [idempotent] $logical already initialized on-chain — updating local state"
+    mark_initialized "$logical"
+    return 0
+  fi
+  echo "$out" >&2
+  die "$logical initialize failed (exit $rc)"
+}
+
 deploy_if_needed() {
   local logical="$1" package="$2"
   local wasm="$WASM_DIR/${package}.wasm"
@@ -147,15 +179,7 @@ init_signal_registry() {
   [[ -n "$cid" ]] || die "signal_registry not deployed"
   is_initialized_flag "$logical" && return 0
   echo "==> initialize signal_registry"
-  stellar contract invoke \
-    --id "$cid" \
-    --source-account "$SOURCE" \
-    --network "$NET" \
-    "${rpc_flags[@]}" \
-    -- \
-    initialize \
-    --admin "$ADMIN"
-  mark_initialized "$logical"
+  invoke_init "$logical" "$cid" --admin "$ADMIN"
 }
 
 init_oracle() {
@@ -168,16 +192,7 @@ init_oracle() {
   # Asset: XLM native — code "XLM", no issuer (CLI accepts void / null for Option::None)
   # Override with ORACLE_BASE_CURRENCY_JSON if your stellar-cli expects different ScVal JSON.
   local asset_json="${ORACLE_BASE_CURRENCY_JSON:-{\"code\":\"XLM\",\"issuer\":null}}"
-  stellar contract invoke \
-    --id "$cid" \
-    --source-account "$SOURCE" \
-    --network "$NET" \
-    "${rpc_flags[@]}" \
-    -- \
-    initialize \
-    --admin "$ADMIN" \
-    --base_currency "$asset_json"
-  mark_initialized "$logical"
+  invoke_init "$logical" "$cid" --admin "$ADMIN" --base_currency "$asset_json"
 }
 
 init_auto_trade() {
@@ -187,15 +202,7 @@ init_auto_trade() {
   [[ -n "$cid" ]] || die "auto_trade (user_portfolio) not deployed"
   is_initialized_flag "$logical" && return 0
   echo "==> initialize auto_trade (user_portfolio)"
-  stellar contract invoke \
-    --id "$cid" \
-    --source-account "$SOURCE" \
-    --network "$NET" \
-    "${rpc_flags[@]}" \
-    -- \
-    initialize \
-    --admin "$ADMIN"
-  mark_initialized "$logical"
+  invoke_init "$logical" "$cid" --admin "$ADMIN"
 }
 
 init_governance() {
@@ -218,13 +225,7 @@ init_governance() {
 
   echo "==> initialize governance (stake_vault) — recipients default to admin (testnet only)"
   # Nested struct flags (stellar-cli); if this fails on your CLI version, set GOVERNANCE_INIT_SKIP=1 and invoke manually.
-  stellar contract invoke \
-    --id "$cid" \
-    --source-account "$SOURCE" \
-    --network "$NET" \
-    "${rpc_flags[@]}" \
-    -- \
-    initialize \
+  invoke_init "$logical" "$cid" \
     --admin "$ADMIN" \
     --name "StellarSwipe Gov" \
     --symbol "SSG" \
@@ -234,8 +235,7 @@ init_governance() {
     --recipients.early_investors "$re" \
     --recipients.community_rewards "$rc" \
     --recipients.treasury "$rtr" \
-    --recipients.public_sale "$rp" || die "governance initialize failed; try GOVERNANCE_INIT_SKIP=1 and run invoke manually (see script header)"
-  mark_initialized "$logical"
+    --recipients.public_sale "$rp"
 }
 
 init_bridge() {

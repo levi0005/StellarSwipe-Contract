@@ -1,5 +1,5 @@
 use soroban_sdk::{Address, Env, IntoVal, Symbol};
-use stellar_swipe_common::Asset;
+use stellar_swipe_common::{Amount, Asset};
 
 use crate::storage::{
     get_fee_rate, get_monthly_trade_volume, get_oracle_contract, remove_monthly_trade_volume,
@@ -45,6 +45,10 @@ pub fn get_fee_rate_for_user(env: &Env, user: &Address) -> u32 {
     }
 }
 
+/// All financial arithmetic in this function goes through `Amount`'s checked
+/// methods; `clippy::arithmetic_side_effects` is set to warn (CI runs clippy
+/// with `-D warnings`) to flag any future raw +/-/* (issue #599).
+#[warn(clippy::arithmetic_side_effects)]
 pub fn record_trade_volume(
     env: &Env,
     user: &Address,
@@ -66,10 +70,10 @@ pub fn record_trade_volume(
         volume_usd: 0,
     });
 
-    let updated_volume = current_volume
-        .volume_usd
-        .checked_add(usd_volume)
-        .ok_or(ContractError::ArithmeticOverflow)?;
+    let updated_volume = Amount::new(current_volume.volume_usd)
+        .checked_add(Amount::new(usd_volume))
+        .map(Amount::value)
+        .map_err(|_| ContractError::ArithmeticOverflow)?;
 
     set_monthly_trade_volume(
         env,

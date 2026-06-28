@@ -81,6 +81,18 @@ pub struct BridgeTransfer {
     pub validator_signatures: Vec<String>,
     pub created_at: u64,
     pub completed_at: Option<u64>,
+    /// Ledger timestamp of the most recent status transition.
+    pub status_updated_at: u64,
+}
+
+/// Lightweight status record returned by `get_transfer_status`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferStatusInfo {
+    pub transfer_id: u64,
+    pub status: TransferStatus,
+    /// Timestamp of the last status change (ledger time).
+    pub last_status_change: u64,
 }
 
 /// Transfer status tracking
@@ -103,7 +115,28 @@ pub enum MonitoringDataKey {
     ChainConfig(u32),                      // By chain discriminant
     PendingTransactions,                   // List of pending transfer IDs
     TransactionIndex(u64),                 // Meta index
+    /// Rolling window of recent finality latencies (seconds).
+    LatencyWindow,
+    /// Whether the automatic latency circuit breaker is tripped.
+    CircuitBreakerTripped,
+    /// Configurable latency threshold and window size for the circuit breaker.
+    LatencyCircuitBreakerConfig,
 }
+
+/// Configuration for the automatic finality-latency circuit breaker.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatencyCircuitBreakerConfig {
+    /// Maximum acceptable average latency (seconds) over the rolling window.
+    pub latency_threshold_secs: u64,
+    /// Number of recent transactions used to compute the rolling average.
+    pub window_size: u32,
+}
+
+/// Default latency threshold: 2× the expected maximum confirmation time
+/// for Ethereum (32 blocks × 12 s/block = 384 s → threshold ≈ 800 s).
+const DEFAULT_LATENCY_THRESHOLD_SECS: u64 = 800;
+const DEFAULT_WINDOW_SIZE: u32 = 10;
 
 // Constants for finality configurations
 const ETHEREUM_FINALITY: u32 = 32;  // 32 blocks (~6.4 min)
@@ -323,12 +356,17 @@ pub fn update_transaction_confirmation_count(
     Ok(false)
 }
 
-/// Mark transaction as finalized
+/// Mark transaction as finalized and record confirmation latency for the circuit breaker.
 fn mark_as_finalized(env: &Env, monitored: &mut MonitoredTransaction) -> Result<(), String> {
+    let now = env.ledger().timestamp();
     monitored.status = MonitoringStatus::Finalized;
-    monitored.finalized_at = Some(env.ledger().timestamp());
+    monitored.finalized_at = Some(now);
 
     store_monitored_tx(env, monitored.transfer_id, monitored);
+
+    // Record latency and potentially trip the circuit breaker.
+    let latency_secs = now.saturating_sub(monitored.first_seen);
+    record_finality_latency(env, latency_secs);
 
     // Emit finalization event
     env.events().publish(
@@ -336,10 +374,107 @@ fn mark_as_finalized(env: &Env, monitored: &mut MonitoredTransaction) -> Result<
             Symbol::new(env, "transaction_finalized"),
             monitored.transfer_id,
         ),
-        monitored.confirmations,
+        (monitored.confirmations, latency_secs),
     );
 
     Ok(())
+}
+
+// ── Circuit Breaker ─────────────────────────────────────────────────────────
+
+/// Record the finality latency for one bridge transaction.
+///
+/// Maintains a rolling window of the last N latencies. If the window average
+/// exceeds the configured threshold, the circuit breaker is tripped automatically
+/// and new bridge transactions are blocked until `clear_circuit_breaker` is called.
+pub fn record_finality_latency(env: &Env, latency_secs: u64) {
+    let config = get_latency_circuit_breaker_config(env);
+
+    let mut window: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&MonitoringDataKey::LatencyWindow)
+        .unwrap_or(Vec::new(env));
+
+    window.push_back(latency_secs);
+
+    // Keep only the last `window_size` entries.
+    let max = config.window_size as u32;
+    while window.len() > max {
+        window.remove(0);
+    }
+
+    env.storage()
+        .persistent()
+        .set(&MonitoringDataKey::LatencyWindow, &window);
+
+    if window.len() >= max {
+        let sum: u64 = (0..window.len()).fold(0u64, |acc, i| {
+            acc.saturating_add(window.get(i).unwrap_or(0))
+        });
+        let avg = sum / window.len() as u64;
+
+        if avg > config.latency_threshold_secs {
+            trip_circuit_breaker(env, avg, config.latency_threshold_secs);
+        }
+    }
+}
+
+/// Check whether the automatic latency circuit breaker is currently tripped.
+pub fn is_circuit_breaker_tripped(env: &Env) -> bool {
+    env.storage()
+        .persistent()
+        .get(&MonitoringDataKey::CircuitBreakerTripped)
+        .unwrap_or(false)
+}
+
+/// Clear the circuit breaker (recovery path).
+/// Should be called by an admin after the underlying latency issue is resolved.
+pub fn clear_circuit_breaker(env: &Env) {
+    env.storage()
+        .persistent()
+        .set(&MonitoringDataKey::CircuitBreakerTripped, &false);
+
+    // Also clear the latency window so recovery starts fresh.
+    env.storage()
+        .persistent()
+        .set(&MonitoringDataKey::LatencyWindow, &Vec::<u64>::new(env));
+
+    env.events().publish(
+        (Symbol::new(env, "circuit_breaker_cleared"),),
+        env.ledger().timestamp(),
+    );
+}
+
+/// Configure the circuit breaker thresholds.
+pub fn set_latency_circuit_breaker_config(env: &Env, config: &LatencyCircuitBreakerConfig) {
+    env.storage()
+        .persistent()
+        .set(&MonitoringDataKey::LatencyCircuitBreakerConfig, config);
+}
+
+/// Get the current circuit breaker configuration (falling back to defaults).
+pub fn get_latency_circuit_breaker_config(env: &Env) -> LatencyCircuitBreakerConfig {
+    env.storage()
+        .persistent()
+        .get(&MonitoringDataKey::LatencyCircuitBreakerConfig)
+        .unwrap_or(LatencyCircuitBreakerConfig {
+            latency_threshold_secs: DEFAULT_LATENCY_THRESHOLD_SECS,
+            window_size: DEFAULT_WINDOW_SIZE,
+        })
+}
+
+fn trip_circuit_breaker(env: &Env, avg_latency_secs: u64, threshold_secs: u64) {
+    env.storage()
+        .persistent()
+        .set(&MonitoringDataKey::CircuitBreakerTripped, &true);
+
+    // Emit a distinct event so monitoring systems can differentiate automatic
+    // trips from a manually triggered pause.
+    env.events().publish(
+        (Symbol::new(env, "circuit_breaker_auto_tripped"),),
+        (avg_latency_secs, threshold_secs, env.ledger().timestamp()),
+    );
 }
 
 /// ==========================
@@ -389,6 +524,7 @@ pub fn handle_reorg(env: &Env, transfer_id: u64) -> Result<(), String> {
     // Reset transfer status if it exists
     if let Some(mut transfer) = get_bridge_transfer(env, transfer_id) {
         transfer.status = TransferStatus::Pending;
+        transfer.status_updated_at = env.ledger().timestamp();
         transfer.validator_signatures = Vec::new(env);
         store_bridge_transfer(env, &transfer);
 
@@ -439,7 +575,9 @@ pub fn mark_transaction_failed(env: &Env, transfer_id: u64) -> Result<(), String
 
     // Update transfer status
     if let Some(mut transfer) = get_bridge_transfer(env, transfer_id) {
+        let now = env.ledger().timestamp();
         transfer.status = TransferStatus::Failed;
+        transfer.status_updated_at = now;
         store_bridge_transfer(env, &transfer);
     }
 
@@ -462,6 +600,17 @@ pub fn get_bridge_transfer(env: &Env, transfer_id: u64) -> Option<BridgeTransfer
         .get(&MonitoringDataKey::BridgeTransfer(transfer_id))
 }
 
+/// Read-only: return the current status and timestamp of the last status change
+/// for a bridge transfer.  Returns `None` if the transfer does not exist.
+pub fn get_transfer_status(env: &Env, transfer_id: u64) -> Option<TransferStatusInfo> {
+    let transfer = get_bridge_transfer(env, transfer_id)?;
+    Some(TransferStatusInfo {
+        transfer_id,
+        status: transfer.status,
+        last_status_change: transfer.status_updated_at,
+    })
+}
+
 /// Store bridge transfer
 pub fn store_bridge_transfer(env: &Env, transfer: &BridgeTransfer) {
     env.storage()
@@ -469,7 +618,10 @@ pub fn store_bridge_transfer(env: &Env, transfer: &BridgeTransfer) {
         .set(&MonitoringDataKey::BridgeTransfer(transfer.transfer_id), transfer);
 }
 
-/// Create new bridge transfer
+/// Create new bridge transfer.
+///
+/// Returns an error if the automatic latency circuit breaker is tripped — new
+/// bridge transactions are blocked until the breaker is cleared by an admin.
 pub fn create_bridge_transfer(
     env: &Env,
     transfer_id: u64,
@@ -481,10 +633,18 @@ pub fn create_bridge_transfer(
     stellar_asset: Asset,
     user: String,
 ) -> Result<(), String> {
+    if is_circuit_breaker_tripped(env) {
+        return Err(String::from_str(
+            env,
+            "CircuitBreakerTripped: bridge paused due to abnormal finality latency",
+        ));
+    }
+
     if amount <= 0 {
         return Err(String::from_str(env, "Invalid amount"));
     }
 
+    let now = env.ledger().timestamp();
     let transfer = BridgeTransfer {
         transfer_id,
         bridge_id,
@@ -496,8 +656,9 @@ pub fn create_bridge_transfer(
         user,
         status: TransferStatus::Pending,
         validator_signatures: Vec::new(env),
-        created_at: env.ledger().timestamp(),
+        created_at: now,
         completed_at: None,
+        status_updated_at: now,
     };
 
     store_bridge_transfer(env, &transfer);
@@ -534,6 +695,7 @@ pub fn add_validator_signature(
     // Update transfer status when enough signatures received
     if transfer.validator_signatures.len() >= 2 {
         transfer.status = TransferStatus::ValidatorApproved;
+        transfer.status_updated_at = env.ledger().timestamp();
     }
 
     store_bridge_transfer(env, &transfer);
@@ -568,6 +730,7 @@ pub fn approve_transfer_for_minting(env: &Env, transfer_id: u64) -> Result<(), S
     }
 
     transfer.status = TransferStatus::Minting;
+    transfer.status_updated_at = env.ledger().timestamp();
     store_bridge_transfer(env, &transfer);
 
     env.events().publish(
@@ -583,8 +746,10 @@ pub fn complete_transfer(env: &Env, transfer_id: u64) -> Result<(), String> {
     let mut transfer = get_bridge_transfer(env, transfer_id)
         .ok_or_else(|| String::from_str(env, "Transfer not found"))?;
 
+    let now = env.ledger().timestamp();
     transfer.status = TransferStatus::Complete;
-    transfer.completed_at = Some(env.ledger().timestamp());
+    transfer.completed_at = Some(now);
+    transfer.status_updated_at = now;
     store_bridge_transfer(env, &transfer);
 
     // Update bridge analytics
@@ -981,6 +1146,109 @@ mod tests {
         assert_eq!(retrieved.required_confirmations, 64);
     }
 
+    // ── get_transfer_status tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_get_transfer_status_not_found() {
+        let env = setup_env();
+        let result = get_transfer_status(&env, 999);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_transfer_status_pending() {
+        let env = setup_env();
+        let user = String::from_str(&env, "user123");
+        let asset = Asset { code: String::from_str(&env, "XLM"), issuer: None };
+
+        create_bridge_transfer(&env, 1, 1, ChainId::Ethereum, ChainId::Polygon, 1_000_000, 100, asset, user).unwrap();
+
+        let info = get_transfer_status(&env, 1).unwrap();
+        assert_eq!(info.transfer_id, 1);
+        assert_eq!(info.status, TransferStatus::Pending);
+        assert_eq!(info.last_status_change, 1000); // env timestamp
+    }
+
+    #[test]
+    fn test_get_transfer_status_transitions_to_validator_approved() {
+        let env = setup_env();
+        let user = String::from_str(&env, "user123");
+        let asset = Asset { code: String::from_str(&env, "XLM"), issuer: None };
+
+        create_bridge_transfer(&env, 1, 1, ChainId::Ethereum, ChainId::Polygon, 1_000_000, 100, asset, user).unwrap();
+
+        let val1 = Address::generate(&env);
+        let val2 = Address::generate(&env);
+        add_validator_signature(&env, 1, val1, String::from_str(&env, "sig1")).unwrap();
+        add_validator_signature(&env, 1, val2, String::from_str(&env, "sig2")).unwrap();
+
+        let info = get_transfer_status(&env, 1).unwrap();
+        assert_eq!(info.status, TransferStatus::ValidatorApproved);
+        assert!(info.last_status_change >= 1000);
+    }
+
+    #[test]
+    fn test_get_transfer_status_transitions_to_complete() {
+        let env = setup_env();
+        let user = String::from_str(&env, "user123");
+        let asset = Asset { code: String::from_str(&env, "XLM"), issuer: None };
+
+        create_bridge_transfer(&env, 1, 1, ChainId::Ethereum, ChainId::Polygon, 1_000_000, 100, asset, user).unwrap();
+
+        complete_transfer(&env, 1).unwrap();
+
+        let info = get_transfer_status(&env, 1).unwrap();
+        assert_eq!(info.status, TransferStatus::Complete);
+    }
+
+    #[test]
+    fn test_get_transfer_status_transitions_to_failed() {
+        let env = setup_env();
+        let tx_hash = String::from_str(&env, "0xabcd1234");
+        let user = String::from_str(&env, "user123");
+        let asset = Asset { code: String::from_str(&env, "XLM"), issuer: None };
+
+        create_bridge_transfer(&env, 1, 1, ChainId::Ethereum, ChainId::Polygon, 1_000_000, 100, asset, user).unwrap();
+        monitor_source_transaction(&env, 1, tx_hash, ChainId::Ethereum, 100).unwrap();
+        mark_transaction_failed(&env, 1).unwrap();
+
+        let info = get_transfer_status(&env, 1).unwrap();
+        assert_eq!(info.status, TransferStatus::Failed);
+    }
+
+    #[test]
+    fn test_get_transfer_status_full_lifecycle() {
+        let env = setup_env();
+        let user = String::from_str(&env, "user123");
+        let tx_hash = String::from_str(&env, "0xabcd1234");
+        let asset = Asset { code: String::from_str(&env, "XLM"), issuer: None };
+
+        // Step 1: Pending
+        create_bridge_transfer(&env, 1, 1, ChainId::Ethereum, ChainId::Polygon, 1_000_000, 100, asset, user).unwrap();
+        assert_eq!(get_transfer_status(&env, 1).unwrap().status, TransferStatus::Pending);
+
+        // Step 2: Source monitoring starts (status stays Pending until validators sign)
+        monitor_source_transaction(&env, 1, tx_hash, ChainId::Ethereum, 100).unwrap();
+        assert_eq!(get_transfer_status(&env, 1).unwrap().status, TransferStatus::Pending);
+
+        // Step 3: ValidatorApproved
+        let val1 = Address::generate(&env);
+        let val2 = Address::generate(&env);
+        add_validator_signature(&env, 1, val1, String::from_str(&env, "s1")).unwrap();
+        add_validator_signature(&env, 1, val2, String::from_str(&env, "s2")).unwrap();
+        assert_eq!(get_transfer_status(&env, 1).unwrap().status, TransferStatus::ValidatorApproved);
+
+        // Step 4: Minting
+        approve_transfer_for_minting(&env, 1).unwrap();
+        assert_eq!(get_transfer_status(&env, 1).unwrap().status, TransferStatus::Minting);
+
+        // Step 5: Complete
+        complete_transfer(&env, 1).unwrap();
+        let final_info = get_transfer_status(&env, 1).unwrap();
+        assert_eq!(final_info.status, TransferStatus::Complete);
+        assert!(final_info.last_status_change >= 1000);
+    }
+
     #[test]
     fn test_invalid_transfer_amount() {
         let env = setup_env();
@@ -1092,5 +1360,136 @@ mod tests {
 
         let transfer = get_bridge_transfer(&env, 1).unwrap();
         assert_eq!(transfer.status, TransferStatus::Complete);
+    }
+
+    // ── Circuit breaker tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn circuit_breaker_not_tripped_under_normal_latency() {
+        let env = setup_env();
+        let config = LatencyCircuitBreakerConfig {
+            latency_threshold_secs: 500,
+            window_size: 3,
+        };
+        set_latency_circuit_breaker_config(&env, &config);
+
+        // Record 3 fast confirmations — well under the threshold.
+        record_finality_latency(&env, 100);
+        record_finality_latency(&env, 150);
+        record_finality_latency(&env, 120);
+
+        assert!(!is_circuit_breaker_tripped(&env));
+    }
+
+    #[test]
+    fn circuit_breaker_trips_when_average_exceeds_threshold() {
+        let env = setup_env();
+        let config = LatencyCircuitBreakerConfig {
+            latency_threshold_secs: 200,
+            window_size: 3,
+        };
+        set_latency_circuit_breaker_config(&env, &config);
+
+        // Push average above threshold.
+        record_finality_latency(&env, 300);
+        record_finality_latency(&env, 400);
+        record_finality_latency(&env, 500);
+
+        assert!(is_circuit_breaker_tripped(&env));
+    }
+
+    #[test]
+    fn circuit_breaker_blocks_new_transfers_when_tripped() {
+        let env = setup_env();
+        let config = LatencyCircuitBreakerConfig {
+            latency_threshold_secs: 100,
+            window_size: 2,
+        };
+        set_latency_circuit_breaker_config(&env, &config);
+
+        // Trip the breaker.
+        record_finality_latency(&env, 500);
+        record_finality_latency(&env, 600);
+        assert!(is_circuit_breaker_tripped(&env));
+
+        // Attempting a new transfer should now fail.
+        let user = String::from_str(&env, "user123");
+        let asset = Asset {
+            code: String::from_str(&env, "XLM"),
+            issuer: None,
+        };
+        let result = create_bridge_transfer(
+            &env,
+            99,
+            1,
+            ChainId::Ethereum,
+            ChainId::Polygon,
+            1_000_000,
+            100,
+            asset,
+            user,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn circuit_breaker_cleared_allows_new_transfers() {
+        let env = setup_env();
+        let config = LatencyCircuitBreakerConfig {
+            latency_threshold_secs: 100,
+            window_size: 2,
+        };
+        set_latency_circuit_breaker_config(&env, &config);
+
+        // Trip the breaker.
+        record_finality_latency(&env, 500);
+        record_finality_latency(&env, 500);
+        assert!(is_circuit_breaker_tripped(&env));
+
+        // Recovery.
+        clear_circuit_breaker(&env);
+        assert!(!is_circuit_breaker_tripped(&env));
+
+        // New transfers should now succeed.
+        let user = String::from_str(&env, "user123");
+        let asset = Asset {
+            code: String::from_str(&env, "XLM"),
+            issuer: None,
+        };
+        let result = create_bridge_transfer(
+            &env,
+            99,
+            1,
+            ChainId::Ethereum,
+            ChainId::Polygon,
+            1_000_000,
+            100,
+            asset,
+            user,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn finality_latency_recorded_on_finalization() {
+        let env = setup_env();
+        let tx_hash = String::from_str(&env, "0xabcd1234");
+
+        monitor_source_transaction(&env, 1, tx_hash, ChainId::Ethereum, 100).unwrap();
+
+        // Advance time so there is a measurable latency.
+        env.ledger().set_timestamp(1500);
+
+        // Finalize — should record latency (1500 - 1000 = 500 s).
+        let config = LatencyCircuitBreakerConfig {
+            latency_threshold_secs: 10_000,
+            window_size: 1,
+        };
+        set_latency_circuit_breaker_config(&env, &config);
+
+        update_transaction_confirmation_count(&env, 1, 132).unwrap();
+
+        // Circuit breaker NOT tripped (500 < 10000).
+        assert!(!is_circuit_breaker_tripped(&env));
     }
 }

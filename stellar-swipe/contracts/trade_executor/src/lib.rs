@@ -6,11 +6,13 @@ pub mod feature_flags;
 pub mod keeper;
 mod oracle;
 pub mod risk_gates;
+pub mod priority;
 pub mod sdex;
 pub mod triggers;
 mod wire;
 
 use errors::{ContractError, InsufficientBalanceDetail, NetworkErrorDetail};
+use shared::math::normalize_amount;
 use risk_gates::{
     check_user_balance, resolve_trade_amount, validate_and_record_position,
     validate_min_trade_size, DEFAULT_ESTIMATED_COPY_TRADE_FEE, DEFAULT_MIN_TRADE_SIZE,
@@ -167,6 +169,15 @@ pub struct PendingLimitOrder {
     pub limit_price: i128,
     pub expires_at_ledger: u32,
 }
+
+soroban_sdk::contractmeta!(
+    key = "SourceHash",
+    val = env!("STELLAR_SOURCE_HASH")
+);
+soroban_sdk::contractmeta!(
+    key = "GitCommit",
+    val = env!("STELLAR_GIT_COMMIT")
+);
 
 #[contract]
 pub struct TradeExecutorContract;
@@ -1130,10 +1141,14 @@ impl TradeExecutorContract {
 
         // Convert the entry-position value to `to_token` units so that both
         // `exit_price` and the entry value are expressed in the same asset unit.
-        let entry_value = amount
-            .checked_mul(entry_price)
-            .ok_or(ContractError::InvalidAmount)?
-            / ENTRY_PRICE_DENOMINATOR;
+        // entry_price is in 7-decimal fixed-point, so amount × entry_price has
+        // 14 implicit decimals; normalize back to 7 via the shared utility.
+        let entry_value = {
+            let product = amount
+                .checked_mul(entry_price)
+                .ok_or(ContractError::InvalidAmount)?;
+            normalize_amount(product, 14, 7).ok_or(ContractError::InvalidAmount)?
+        };
         let realized_pnl = exit_price - entry_value;
         let close_sym = Symbol::new(&env, "close_position");
         let mut close_args = Vec::<Val>::new(&env);
@@ -1160,10 +1175,15 @@ impl TradeExecutorContract {
     /// Execute a batch of copy trades. Each trade is attempted independently;
     /// a failure in one trade does NOT roll back successful trades.
     ///
-    /// Returns a `Vec<BatchTradeResult>` with one entry per input trade, in order.
+    /// Trades are processed in priority-tier order (high-stake -> high-tenure -> standard)
+    /// when a portfolio contract is configured (Issue #682). A fairness fallback
+    /// prevents starvation of standard followers after N consecutive priority-only batches.
+    ///
+    /// Returns a Vec<BatchTradeResult> with one entry per input trade, in the
+    /// priority-sorted order (not the original input order).
     ///
     /// # Errors
-    /// - [`ContractError::InvalidAmount`] — batch is empty or exceeds `MAX_BATCH_SIZE`.
+    /// - [ContractError::InvalidAmount] - batch is empty or exceeds MAX_BATCH_SIZE.
     pub fn batch_execute(
         env: Env,
         trades: Vec<BatchTradeInput>,

@@ -14,6 +14,7 @@ members = [
   "contracts/analytics",
   "contracts/integration_tests",
   "contracts/bridge",
+  "contracts/stake_vault_kani",
 ]
 
 [workspace.dependencies]
@@ -47,7 +48,18 @@ unused_unsafe = "allow"
 non_camel_case_types = "allow"
 
 [workspace.lints.clippy]
-all = "allow"
+# Soroban contract entry-points routinely exceed Clippy's 7-argument
+# threshold because the host environment requires explicit argument passing
+# (no struct wrappers in the public ABI).  Applies workspace-wide because
+# every contract crate is affected equally.
+too_many_arguments = "allow"
+# Module names matching their parent (e.g. `mod errors { … ContractError }`)
+# are idiomatic in Soroban crates where each module owns one type.
+module_inception = "allow"
+# Soroban storage accessors return raw values and callers are expected to
+# handle the None case at the call site; map_or / unwrap_or patterns are
+# preferred over question-mark propagation through Option.
+option_if_let_else = "allow"
 
 # Smaller WASM for Soroban deploys (lower upload cost + instruction footprint).
 # Build:  cargo build --workspace --target wasm32-unknown-unknown --release
