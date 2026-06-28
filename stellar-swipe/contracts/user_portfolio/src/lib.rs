@@ -127,6 +127,13 @@ pub struct UserPortfolio;
 
 #[contractimpl]
 impl UserPortfolio {
+    pub fn get_build_info(env: Env) -> soroban_sdk::Map<soroban_sdk::String, soroban_sdk::String> {
+        let mut m = soroban_sdk::Map::new(&env);
+        m.set(soroban_sdk::String::from_str(&env, "version"), soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION")));
+        m.set(soroban_sdk::String::from_str(&env, "git_commit"), soroban_sdk::String::from_str(&env, env!("GIT_COMMIT_HASH")));
+        m
+    }
+
     /// One-time setup: admin and oracle (`get_price(asset_pair) -> OraclePrice`) used for unrealized P&L.
     pub fn initialize(env: Env, admin: Address, oracle: Address) {
         if env.storage().instance().has(&DataKey::Initialized) {

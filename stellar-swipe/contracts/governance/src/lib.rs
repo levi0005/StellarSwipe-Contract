@@ -301,6 +301,13 @@ impl GovernanceContract {
         Ok(())
     }
 
+    pub fn get_build_info(env: Env) -> soroban_sdk::Map<soroban_sdk::String, soroban_sdk::String> {
+        let mut m = soroban_sdk::Map::new(&env);
+        m.set(soroban_sdk::String::from_str(&env, "version"), soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION")));
+        m.set(soroban_sdk::String::from_str(&env, "git_commit"), soroban_sdk::String::from_str(&env, env!("GIT_COMMIT_HASH")));
+        m
+    }
+
     /// Read-only health probe for monitoring and front-ends (no auth).
     pub fn health_check(env: Env) -> stellar_swipe_common::HealthStatus {
         let version = String::from_str(&env, env!("CARGO_PKG_VERSION"));

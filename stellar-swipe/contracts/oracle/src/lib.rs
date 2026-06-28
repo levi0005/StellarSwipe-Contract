@@ -58,6 +58,13 @@ impl OracleContract {
     /// - `admin`: Address that will hold admin privileges.
     /// - `base_currency`: The base asset all prices are quoted against.
     ///
+    pub fn get_build_info(env: Env) -> soroban_sdk::Map<soroban_sdk::String, soroban_sdk::String> {
+        let mut m = soroban_sdk::Map::new(&env);
+        m.set(soroban_sdk::String::from_str(&env, "version"), soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION")));
+        m.set(soroban_sdk::String::from_str(&env, "git_commit"), soroban_sdk::String::from_str(&env, env!("GIT_COMMIT_HASH")));
+        m
+    }
+
     /// # Returns
     /// Nothing. Panics if already initialized.
     pub fn initialize(env: Env, admin: Address, base_currency: Asset) {

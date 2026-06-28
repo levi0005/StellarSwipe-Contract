@@ -20,6 +20,8 @@ pub mod perf;
 pub mod rate_limit;
 #[allow(deprecated)]
 pub mod replay_protection;
+pub mod ttl_manager;
+pub mod budget_regression;
 
 pub use amm_bridge::{
     build_fallback_chain, emit_fallback_used, emit_quote_discovered, emit_route_planned,
