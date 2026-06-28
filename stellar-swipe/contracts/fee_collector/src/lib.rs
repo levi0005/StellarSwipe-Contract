@@ -489,6 +489,9 @@ impl FeeCollector {
     }
 
     /// Retry a previously queued fee collection request.
+    ///
+    /// Uses the shared `stellar_swipe_common::retry_backoff` helper for
+    /// exponential backoff and attempt counting (Issue #699).
     pub fn retry_failed_fee_collection(
         env: Env,
         admin: Address,
@@ -502,12 +505,25 @@ impl FeeCollector {
         let failed =
             get_failed_fee_collection(&env, &id).ok_or(ContractError::FailedCollectionNotFound)?;
 
-        if failed.retry_count >= get_fee_optimization_config(&env).max_retry_attempts {
+        let config = get_fee_optimization_config(&env);
+        let retry_config = stellar_swipe_common::retry_backoff::RetryConfig {
+            max_attempts: config.max_retry_attempts,
+            base_delay_ledgers: 5,   // ~25 seconds at 5s/ledger
+            max_delay_ledgers: Some(200), // ~16 minutes max
+        };
+        let retry_state = stellar_swipe_common::retry_backoff::RetryState {
+            attempt: failed.retry_count,
+        };
+
+        // Use shared helper to check if retry is allowed
+        if stellar_swipe_common::retry_backoff::should_retry(&retry_state, &retry_config).is_none()
+        {
             return Err(ContractError::RetryLimitExceeded);
         }
 
         let mut retry_record = failed.clone();
-        retry_record.retry_count = retry_record.retry_count.saturating_add(1);
+        let next = stellar_swipe_common::retry_backoff::next_retry_state(&retry_state);
+        retry_record.retry_count = next.attempt;
         set_failed_fee_collection(&env, &retry_record);
 
         let result = Self::collect_fee_with_recovery(

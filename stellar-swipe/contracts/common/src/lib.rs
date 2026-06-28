@@ -2,6 +2,7 @@
 
 #[allow(deprecated)]
 pub mod amm_bridge;
+pub mod retry_backoff;
 pub mod assets;
 /// Checked-arithmetic wrapper for financial amounts (issue #599).
 pub mod checked_amount;
@@ -65,6 +66,9 @@ pub use rate_limit::{
     RateLimitConfig, RateLimitError,
 };
 pub use replay_protection::{current_nonce, verify_and_commit, ReplayError};
+pub use retry_backoff::{
+    has_remaining_attempts, next_retry_state, should_retry, RetryConfig, RetryState,
+};
 
 #[cfg(test)]
 mod storage_key_tests;

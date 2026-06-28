@@ -4,6 +4,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Sy
 
 mod admin;
 mod advanced_risk;
+mod loss_streak;
 #[cfg(feature = "testutils")]
 pub mod amm_bridge;
 #[cfg(not(feature = "testutils"))]
@@ -578,6 +579,9 @@ impl AutoTradeContract {
             return Err(AutoTradeError::RateLimited);
         }
 
+        // Check loss-streak pause (Issue #698)
+        loss_streak::check_loss_streak_paused(&env, &user)?;
+
         let signal = storage::get_signal(&env, signal_id).ok_or(AutoTradeError::SignalNotFound)?;
 
         if env.ledger().timestamp() > signal.expiry {
@@ -643,6 +647,9 @@ impl AutoTradeContract {
         };
 
         logging::record_trade_outcome(&env, &status);
+
+        // Record loss-streak outcome (Issue #698)
+        loss_streak::record_trade_outcome(&env, &user, &status);
 
         admin::update_cb_stats(
             &env,
@@ -1119,6 +1126,40 @@ impl AutoTradeContract {
             would_succeed: false,
             failure_reason: Some(String::from_str(env, reason)),
         }
+    }
+
+    // ── Loss-streak pause (Issue #698) ──────────────────────────────────────────
+
+    /// Get the loss-streak threshold configuration.
+    pub fn get_loss_streak_config(env: Env) -> storage::LossStreakConfig {
+        storage::get_loss_streak_config(&env)
+    }
+
+    /// Set the loss-streak threshold (admin only).
+    pub fn set_loss_streak_threshold(
+        env: Env,
+        caller: Address,
+        threshold: u32,
+    ) -> Result<(), AutoTradeError> {
+        loss_streak::set_loss_streak_threshold(&env, &caller, threshold)
+    }
+
+    /// Get the per-user consecutive-loss counter.
+    pub fn get_loss_streak_counter(env: Env, user: Address) -> storage::LossStreakCounter {
+        storage::get_loss_streak_counter(&env, &user)
+    }
+
+    /// Check whether a user is currently paused due to loss-streak.
+    pub fn is_loss_streak_paused(env: Env, user: Address) -> bool {
+        storage::is_loss_streak_paused(&env, &user)
+    }
+
+    /// Explicitly resume auto-trading after a loss-streak pause (user only).
+    pub fn resume_after_loss_streak(
+        env: Env,
+        user: Address,
+    ) -> Result<(), AutoTradeError> {
+        loss_streak::resume_after_loss_streak(&env, &user)
     }
 
     /// Returns estimated storage usage metrics.
