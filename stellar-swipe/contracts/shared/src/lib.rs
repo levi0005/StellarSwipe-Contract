@@ -1,6 +1,8 @@
 #![no_std]
 
 pub mod access_control;
+/// Asset metadata registry (Issue #700).
+pub mod asset_registry;
 
 pub mod auth;
 #[allow(deprecated)]
