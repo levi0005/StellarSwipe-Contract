@@ -169,6 +169,8 @@ pub enum ContestError {
     NotQualified = 805,
     TradingPaused = 806,
     CircuitBreakerTriggered = 807,
+    /// Finalization was attempted before the committed randomness ledger is reached.
+    RandomnessNotAvailable = 808,
 }
 
 #[contracterror]
