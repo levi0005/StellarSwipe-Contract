@@ -1,9 +1,11 @@
 //! Hot-entry TTL management for persistent storage.
 //!
 //! Soroban archives persistent entries whose TTL reaches zero.  For keys that
-//! are read frequently (active signals, leaderboard indexes) we extend their
-//! TTL on every access **only when the remaining TTL has dropped below the
-//! configured threshold**, avoiding wasteful extend calls on every single read.
+//! are read frequently (active signals, leaderboard indexes) we call
+//! `extend_ttl` on every access using Soroban's built-in `threshold` parameter:
+//! the host only performs the extension when the remaining TTL has already
+//! dropped below `threshold`, so no wasted instructions are incurred when the
+//! TTL is still healthy.
 //!
 //! # Constants
 //! | Constant | Default | Purpose |
@@ -17,16 +19,18 @@ use soroban_sdk::{Env, IntoVal, Val};
 pub const HOT_KEY_TTL_TARGET_LEDGERS: u32 = 518_400;
 
 /// Only extend when the remaining TTL drops below this threshold: ~6 days.
-/// Prevents extending on every single access while still keeping the entry
-/// alive well before it would be archived.
+/// Passed as the `threshold` argument to `extend_ttl`; the Soroban host skips
+/// the operation when the TTL is already above this value.
 pub const HOT_KEY_TTL_THRESHOLD_LEDGERS: u32 = 103_680;
 
 /// Extend the TTL of a **persistent** storage entry identified by `key` if its
 /// remaining TTL is below [`HOT_KEY_TTL_THRESHOLD_LEDGERS`].
 ///
-/// Does nothing when:
-/// - The entry does not exist in persistent storage.
-/// - The remaining TTL is already above the threshold (avoids wasted instructions).
+/// Uses the native `extend_ttl(key, threshold, extend_to)` semantics: the host
+/// skips the call when the entry's current TTL >= `threshold`, so this is safe
+/// to call on every read/write without wasting instructions.
+///
+/// Does nothing when the entry does not exist in persistent storage.
 pub fn bump_persistent_if_needed<K>(env: &Env, key: &K)
 where
     K: IntoVal<Env, Val>,
@@ -35,17 +39,15 @@ where
     if !storage.has(key) {
         return;
     }
-    let current_ttl = storage.get_ttl(key);
-    if current_ttl < HOT_KEY_TTL_THRESHOLD_LEDGERS {
-        storage.extend_ttl(key, HOT_KEY_TTL_THRESHOLD_LEDGERS, HOT_KEY_TTL_TARGET_LEDGERS);
-    }
+    storage.extend_ttl(key, HOT_KEY_TTL_THRESHOLD_LEDGERS, HOT_KEY_TTL_TARGET_LEDGERS);
 }
 
 /// Unconditionally extend the TTL of a persistent entry to
-/// [`HOT_KEY_TTL_TARGET_LEDGERS`] regardless of the current remaining TTL.
+/// [`HOT_KEY_TTL_TARGET_LEDGERS`].
 ///
-/// Use this in the keeper batch-bump entrypoint where the caller explicitly
-/// wants to top-up a set of keys.
+/// Passes `threshold = 0` so the extend always fires regardless of the current
+/// TTL.  Use this in the keeper batch-bump entrypoint where the caller wants to
+/// explicitly top-up a set of keys.
 pub fn force_bump_persistent<K>(env: &Env, key: &K)
 where
     K: IntoVal<Env, Val>,
@@ -56,27 +58,10 @@ where
     }
 }
 
-#[cfg(any(test, feature = "testutils"))]
-pub mod testutils {
-    use super::*;
-
-    /// Returns the current TTL for a persistent key, or 0 if absent.
-    pub fn get_ttl_or_zero<K>(env: &Env, key: &K) -> u32
-    where
-        K: IntoVal<Env, Val>,
-    {
-        let storage = env.storage().persistent();
-        if storage.has(key) {
-            storage.get_ttl(key)
-        } else {
-            0
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::storage::Persistent as _;
     use soroban_sdk::{contract, contractimpl, contracttype, Env};
 
     #[contracttype]
@@ -99,12 +84,11 @@ mod tests {
     }
 
     #[test]
-    fn bump_extends_ttl_for_existing_entry() {
+    fn bump_extends_ttl_for_low_ttl_entry() {
         let (env, id) = setup();
         env.as_contract(&id, || {
             env.storage().persistent().set(&TestKey::Hot, &42u32);
-            // Initial TTL should be at the protocol minimum (1 ledger after set in testenv).
-            // Force it below the threshold so bump_persistent_if_needed triggers.
+            // Start with a low TTL (below threshold) so bump_persistent_if_needed fires.
             env.storage()
                 .persistent()
                 .extend_ttl(&TestKey::Hot, 0, HOT_KEY_TTL_THRESHOLD_LEDGERS - 1);
@@ -113,12 +97,15 @@ mod tests {
             bump_persistent_if_needed(&env, &TestKey::Hot);
             let ttl_after = env.storage().persistent().get_ttl(&TestKey::Hot);
             assert!(ttl_after > ttl_before, "TTL should increase after bump");
-            assert!(ttl_after >= HOT_KEY_TTL_THRESHOLD_LEDGERS);
+            assert!(
+                ttl_after >= HOT_KEY_TTL_TARGET_LEDGERS,
+                "TTL should reach the target"
+            );
         });
     }
 
     #[test]
-    fn bump_skips_when_ttl_above_threshold() {
+    fn bump_noop_when_ttl_above_threshold() {
         let (env, id) = setup();
         env.as_contract(&id, || {
             env.storage().persistent().set(&TestKey::Hot, &99u32);
@@ -127,9 +114,9 @@ mod tests {
                 .extend_ttl(&TestKey::Hot, 0, HOT_KEY_TTL_TARGET_LEDGERS);
 
             let ttl_before = env.storage().persistent().get_ttl(&TestKey::Hot);
+            // With threshold-based extend_ttl the host skips when TTL >= threshold.
             bump_persistent_if_needed(&env, &TestKey::Hot);
             let ttl_after = env.storage().persistent().get_ttl(&TestKey::Hot);
-            // TTL must not decrease (no unnecessary extend).
             assert!(ttl_after >= ttl_before, "TTL must not decrease on no-op bump");
         });
     }
@@ -148,6 +135,7 @@ mod tests {
         let (env, id) = setup();
         env.as_contract(&id, || {
             env.storage().persistent().set(&TestKey::Hot, &1u32);
+            // Start at target so normal threshold-bump wouldn't trigger.
             env.storage()
                 .persistent()
                 .extend_ttl(&TestKey::Hot, 0, HOT_KEY_TTL_TARGET_LEDGERS);
@@ -156,7 +144,7 @@ mod tests {
             let ttl_after = env.storage().persistent().get_ttl(&TestKey::Hot);
             assert!(
                 ttl_after >= ttl_before,
-                "force_bump must not shrink TTL from target"
+                "force_bump must not shrink TTL below target"
             );
         });
     }
