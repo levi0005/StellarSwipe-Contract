@@ -2,8 +2,9 @@
 
 use crate::errors::OracleError;
 use crate::storage::{get_base_currency, get_price};
+use shared::math::normalize_amount;
 use soroban_sdk::{contracttype, vec, Env, Map, Vec};
-use stellar_swipe_common::{Asset, AssetPair, STELLAR_AMOUNT_SCALE};
+use stellar_swipe_common::{Asset, AssetPair};
 
 const MAX_PATH_LENGTH: u32 = 3;
 
@@ -32,6 +33,11 @@ pub fn convert_to_base(env: &Env, amount: i128, asset: Asset) -> Result<i128, Or
 }
 
 /// Direct conversion: asset → base
+///
+/// `price` is expressed in 7-decimal fixed-point (Stellar standard), so the
+/// product `amount × price` carries 14 implicit decimals.  We use
+/// `shared::math::normalize_amount` to scale it back down to 7 decimals
+/// (truncating toward zero) instead of a bare division by a magic constant.
 fn convert_direct(env: &Env, amount: i128, from: &Asset, to: &Asset) -> Result<i128, OracleError> {
     let pair = AssetPair {
         base: from.clone(),
@@ -39,10 +45,13 @@ fn convert_direct(env: &Env, amount: i128, from: &Asset, to: &Asset) -> Result<i
     };
     let price = get_price(env, &pair)?;
 
-    Ok(amount
+    let product = amount
         .checked_mul(price)
-        .and_then(|v| v.checked_div(STELLAR_AMOUNT_SCALE))
-        .ok_or(OracleError::ConversionOverflow)?)
+        .ok_or(OracleError::ConversionOverflow)?;
+
+    // Product has 14 implicit decimals (7 from amount + 7 from price).
+    // Rescale to 7 decimals using the shared utility.
+    normalize_amount(product, 14, 7).ok_or(OracleError::ConversionOverflow)
 }
 
 /// Path-based conversion: asset → intermediate(s) → base
@@ -182,7 +191,7 @@ mod tests {
                 base: usdc.clone(),
                 quote: xlm.clone(),
             };
-            set_price(env, &pair, 10 * STELLAR_AMOUNT_SCALE);
+            set_price(env, &pair, 10 * 10_000_000i128); // 10 XLM per USDC (7-decimal rate)
 
             // Convert 100 USDC to XLM
             let result = convert_to_base(env, 100_0000000, usdc).unwrap();

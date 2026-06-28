@@ -12,6 +12,7 @@ pub mod events;
 pub mod initializable;
 /// Minimum-liquidity threshold guard for pooled-fund withdrawals (issue #591).
 pub mod liquidity_pool;
+/// Decimal-precision scaling helpers (Issue #562).
 pub mod math;
 /// Shared emergency-pause state and guard (Issue #561).
 pub mod pausable;
