@@ -100,3 +100,61 @@ jobs:
           name: soroban-wasm-optimized
           path: stellar-swipe/target/wasm-optimized/*.wasm
           if-no-files-found: error
+
+  # ── Fuzz job (runs on PRs touching common/ or shared/) ────────────────────
+  fuzz:
+    runs-on: ubuntu-latest
+    # Only run fuzzing on PRs that touch the targeted modules.
+    if: |
+      github.event_name == 'pull_request' &&
+      (
+        contains(github.event.pull_request.title, 'common') ||
+        contains(toJson(github.event.pull_request.changed_files), 'contracts/common') ||
+        contains(toJson(github.event.pull_request.changed_files), 'contracts/shared')
+      )
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fuzzing requires a nightly toolchain (libfuzzer).
+      - name: Setup nightly Rust for fuzzing
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stellar-swipe/contracts/common/fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Run each fuzz target for a bounded time budget.
+      # 30 seconds per target keeps the job fast; run locally for longer coverage.
+      - name: Fuzz — storage_key_derivation (30s)
+        run: |
+          cd stellar-swipe/contracts/common
+          cargo +nightly fuzz run storage_key_derivation -- \
+            -max_total_time=30 \
+            -timeout=10 \
+            -detect_leaks=0
+
+      - name: Fuzz — xdr_roundtrip (30s)
+        run: |
+          cd stellar-swipe/contracts/common
+          cargo +nightly fuzz run xdr_roundtrip -- \
+            -max_total_time=30 \
+            -timeout=10 \
+            -detect_leaks=0
+
+      # Upload any crash artifacts found during the bounded run.
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: |
+            stellar-swipe/contracts/common/fuzz/artifacts/
+            stellar-swipe/contracts/common/fuzz/corpus/
+          if-no-files-found: ignore
