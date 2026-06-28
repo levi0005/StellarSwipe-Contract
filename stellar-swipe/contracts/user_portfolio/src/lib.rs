@@ -24,10 +24,22 @@ pub use preferences::{
     TradingStyle,
 };
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 use storage::DataKey;
 
 pub use subscriptions::SubscriptionError;
+
+/// A point-in-time record of a user's total portfolio value (issue #685).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortfolioSnapshot {
+    /// Ledger timestamp when the snapshot was taken.
+    pub timestamp: u64,
+    /// Total portfolio value at snapshot time (realized_pnl + unrealized_pnl).
+    /// When the oracle is unavailable unrealized P&L is excluded; `total_pnl`
+    /// from `get_pnl()` is used directly as the snapshot value.
+    pub total_value: i128,
+}
 
 /// Aggregated P&L for display. When the oracle cannot supply a price and there are open
 /// positions, `unrealized_pnl` is `None` and `total_pnl` equals `realized_pnl` only.
@@ -738,6 +750,102 @@ impl UserPortfolio {
     /// Returns the tag (if any) for a specific position owned by `user`.
     pub fn get_position_tag(env: Env, user: Address, position_id: u64) -> Option<String> {
         position_tags::get_position_tag(&env, user, position_id)
+    }
+
+    // ── Portfolio snapshots (issue #685) ─────────────────────────────────────────
+
+    /// Record a snapshot of `user`'s current total portfolio value with a timestamp.
+    ///
+    /// Permissionless — keepers, admins, and users themselves may call this.
+    /// Snapshot value is derived from `get_pnl().total_pnl`.
+    pub fn take_snapshot(env: Env, user: Address) -> PortfolioSnapshot {
+        let pnl = queries::compute_get_pnl(&env, user.clone());
+        let total_value = pnl.total_pnl;
+        let now = env.ledger().timestamp();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::PortfolioSnapshotEntry(user.clone(), now), &total_value);
+
+        let ts_key = DataKey::UserSnapshotTimestamps(user.clone());
+        let mut timestamps: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ts_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        timestamps.push_back(now);
+        env.storage().persistent().set(&ts_key, &timestamps);
+
+        #[allow(deprecated)]
+        env.events().publish(
+            (
+                Symbol::new(&env, "user_portfolio"),
+                Symbol::new(&env, "snapshot_taken"),
+            ),
+            (user, now, total_value),
+        );
+
+        PortfolioSnapshot { timestamp: now, total_value }
+    }
+
+    /// Keeper- or admin-triggerable batch snapshot: records the current portfolio
+    /// value for every address in `users` in a single call.
+    /// Returns the number of snapshots recorded.
+    pub fn batch_snapshot(env: Env, caller: Address, users: Vec<Address>) -> u32 {
+        caller.require_auth();
+        let mut count = 0u32;
+        for i in 0..users.len() {
+            let user = users.get(i).unwrap();
+            let pnl = queries::compute_get_pnl(&env, user.clone());
+            let total_value = pnl.total_pnl;
+            let now = env.ledger().timestamp();
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::PortfolioSnapshotEntry(user.clone(), now), &total_value);
+
+            let ts_key = DataKey::UserSnapshotTimestamps(user.clone());
+            let mut timestamps: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&ts_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            timestamps.push_back(now);
+            env.storage().persistent().set(&ts_key, &timestamps);
+
+            count += 1;
+        }
+        count
+    }
+
+    /// Returns all portfolio snapshots for `user` whose timestamp falls in
+    /// `[from, to]` (inclusive), ordered by ascending timestamp.
+    pub fn get_snapshot_history(
+        env: Env,
+        user: Address,
+        from: u64,
+        to: u64,
+    ) -> Vec<PortfolioSnapshot> {
+        let ts_key = DataKey::UserSnapshotTimestamps(user.clone());
+        let timestamps: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ts_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut result = Vec::new(&env);
+        for i in 0..timestamps.len() {
+            let ts = timestamps.get(i).unwrap();
+            if ts >= from && ts <= to {
+                let total_value: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::PortfolioSnapshotEntry(user.clone(), ts))
+                    .unwrap_or(0);
+                result.push_back(PortfolioSnapshot { timestamp: ts, total_value });
+            }
+        }
+        result
     }
 
     fn require_admin(env: &Env) {
@@ -1696,6 +1804,113 @@ mod tests {
                 .unwrap()
         });
         assert_eq!(pos.status, PositionStatus::Closed);
+    }
+}
+
+// ── Portfolio snapshot tests (issue #685) ─────────────────────────────────────
+#[cfg(test)]
+mod snapshot_tests {
+    use super::oracle_ok::OracleMock;
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger};
+
+    fn setup(env: &Env) -> (Address, Address) {
+        env.mock_all_auths();
+        let admin = Address::generate(env);
+        let oracle = env.register_contract(None, OracleMock);
+        let contract_id = env.register_contract(None, UserPortfolio);
+        let client = UserPortfolioClient::new(env, &contract_id);
+        client.initialize(&admin, &oracle);
+        (admin, contract_id)
+    }
+
+    #[test]
+    fn take_snapshot_records_value_and_timestamp() {
+        let env = Env::default();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+
+        let snap = client.take_snapshot(&user);
+        assert_eq!(snap.timestamp, 1_000);
+        assert_eq!(snap.total_value, 0); // no positions → P&L = 0
+    }
+
+    #[test]
+    fn snapshots_ordered_by_ascending_timestamp() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+
+        env.ledger().with_mut(|l| l.timestamp = 100);
+        client.take_snapshot(&user);
+        env.ledger().with_mut(|l| l.timestamp = 200);
+        client.take_snapshot(&user);
+        env.ledger().with_mut(|l| l.timestamp = 300);
+        client.take_snapshot(&user);
+
+        let history = client.get_snapshot_history(&user, &0u64, &u64::MAX);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.get(0).unwrap().timestamp, 100);
+        assert_eq!(history.get(1).unwrap().timestamp, 200);
+        assert_eq!(history.get(2).unwrap().timestamp, 300);
+    }
+
+    #[test]
+    fn get_snapshot_history_filters_by_range() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+
+        for ts in [100u64, 200, 300, 400, 500] {
+            env.ledger().with_mut(|l| l.timestamp = ts);
+            client.take_snapshot(&user);
+        }
+
+        let history = client.get_snapshot_history(&user, &200u64, &400u64);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.get(0).unwrap().timestamp, 200);
+        assert_eq!(history.get(2).unwrap().timestamp, 400);
+    }
+
+    #[test]
+    fn batch_snapshot_records_all_users() {
+        let env = Env::default();
+        env.ledger().with_mut(|l| l.timestamp = 500);
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let keeper = Address::generate(&env);
+        let user_a = Address::generate(&env);
+        let user_b = Address::generate(&env);
+        let user_c = Address::generate(&env);
+
+        let mut users = soroban_sdk::vec![&env];
+        users.push_back(user_a.clone());
+        users.push_back(user_b.clone());
+        users.push_back(user_c.clone());
+
+        let count = client.batch_snapshot(&keeper, &users);
+        assert_eq!(count, 3);
+
+        for user in [user_a, user_b, user_c] {
+            let history = client.get_snapshot_history(&user, &0u64, &u64::MAX);
+            assert_eq!(history.len(), 1);
+            assert_eq!(history.get(0).unwrap().timestamp, 500);
+        }
+    }
+
+    #[test]
+    fn get_snapshot_history_empty_when_no_snapshots() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+
+        let history = client.get_snapshot_history(&user, &0u64, &u64::MAX);
+        assert_eq!(history.len(), 0);
     }
 }
 

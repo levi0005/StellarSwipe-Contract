@@ -66,8 +66,8 @@ use community_voting::{
 };
 use contests::{Contest, ContestEntry, ContestMetric, ContestStatus};
 use errors::{
-    AdminError, AiScoreError, ComboError, ContestError, CrossChainError, SignalEditError,
-    SignalOutcomeError, TemplateError, VersioningError,
+    AdminError, AiScoreError, ComboError, ContestError, CrossChainError, SignalCancelError,
+    SignalEditError, SignalOutcomeError, TemplateError, VersioningError,
 };
 pub use leaderboard::{
     get_leaderboard as get_leaderboard_internal, update_leaderboard_index, LeaderboardMetric,
@@ -143,6 +143,9 @@ pub enum StorageKey {
     RecordedSignalOutcomes,
     /// Rolling reputation score per provider (Issue #170).
     ProviderReputationScore(Address),
+    /// Minimum number of seconds a signal must remain active before the provider
+    /// may cancel it. Set by admin; 0 means no minimum (issue #687).
+    MinSignalLifetime,
 }
 #[contractimpl]
 impl SignalRegistry {
@@ -1218,6 +1221,80 @@ impl SignalRegistry {
     pub fn get_provider_reputation_score(env: Env, provider: Address) -> u32 {
         let rep_key = StorageKey::ProviderReputationScore(provider);
         env.storage().instance().get(&rep_key).unwrap_or(50)
+    }
+
+    // ── Minimum signal lifetime (issue #687) ────────────────────────────────────
+
+    /// Admin: set the minimum number of seconds a signal must remain active
+    /// before the provider may cancel it. Set to 0 to disable the minimum.
+    pub fn set_min_signal_lifetime(
+        env: Env,
+        caller: Address,
+        min_lifetime_secs: u64,
+    ) -> Result<(), AdminError> {
+        admin::require_admin(&env, &caller)?;
+        caller.require_auth();
+        env.storage()
+            .instance()
+            .set(&StorageKey::MinSignalLifetime, &min_lifetime_secs);
+        Ok(())
+    }
+
+    /// Returns the configured minimum signal lifetime in seconds (0 if not set).
+    pub fn get_min_signal_lifetime(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&StorageKey::MinSignalLifetime)
+            .unwrap_or(0)
+    }
+
+    /// Provider-initiated cancellation of an active signal.
+    ///
+    /// Fails with [`SignalCancelError::LifetimeNotElapsed`] if the signal has not
+    /// yet been active for the admin-configured minimum lifetime. Natural expiry
+    /// is not affected — signals that pass their `expiry` timestamp are handled
+    /// separately by the expiry cleanup path and this restriction does not apply.
+    pub fn cancel_signal(
+        env: Env,
+        provider: Address,
+        signal_id: u64,
+    ) -> Result<(), SignalCancelError> {
+        provider.require_auth();
+
+        let mut signals = Self::get_signals_map(&env);
+        let mut signal = signals
+            .get(signal_id)
+            .ok_or(SignalCancelError::NotFound)?;
+
+        if signal.provider != provider {
+            return Err(SignalCancelError::NotOwner);
+        }
+
+        if signal.status != SignalStatus::Active {
+            return Err(SignalCancelError::NotActive);
+        }
+
+        let min_lifetime: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::MinSignalLifetime)
+            .unwrap_or(0);
+
+        let now = env.ledger().timestamp();
+        let elapsed = now.saturating_sub(signal.submitted_at);
+
+        if elapsed < min_lifetime {
+            return Err(SignalCancelError::LifetimeNotElapsed);
+        }
+
+        signal.status = SignalStatus::Cancelled;
+        signals.set(signal_id, signal);
+        Self::save_signals_map(&env, &signals);
+
+        validation::decrement_provider_active_count(&env, &provider);
+        events::emit_signal_cancelled(&env, signal_id, provider);
+
+        Ok(())
     }
 
     /// Provider appeals an open community-voting dispute against them (Issue #539).

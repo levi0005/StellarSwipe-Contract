@@ -29,5 +29,9 @@ path = "tests/integration/test_complete_user_journey.rs"
 name = "test_multisig_governance"
 path = "tests/integration/test_multisig_governance.rs"
 
+[[test]]
+name = "test_signal_to_reward_lifecycle"
+path = "tests/integration/test_signal_to_reward_lifecycle.rs"
+
 [lints]
 workspace = true

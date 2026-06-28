@@ -34,6 +34,8 @@ pub enum SignalStatus {
     /// Provider's Stellar account was deleted (merged). Signal is orphaned.
     /// Existing copiers may still close open positions; new copies are blocked.
     ProviderDeleted,
+    /// Provider explicitly cancelled the signal after the minimum lifetime elapsed.
+    Cancelled,
 }
 
 #[contracttype]

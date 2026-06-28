@@ -398,3 +398,9 @@ pub fn emit_signal_orphaned(env: &Env, signal_id: u64, reason: String) {
     let topics = (Symbol::new(env, "signal_orphaned"),);
     env.events().publish(topics, (signal_id, reason));
 }
+
+/// Emitted when a provider cancels a signal after the minimum lifetime has elapsed (issue #687).
+pub fn emit_signal_cancelled(env: &Env, signal_id: u64, provider: Address) {
+    let topics = (Symbol::new(env, "signal_cancelled"),);
+    env.events().publish(topics, (signal_id, provider));
+}

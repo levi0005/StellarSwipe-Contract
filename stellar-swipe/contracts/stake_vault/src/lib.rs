@@ -125,6 +125,10 @@ pub enum StorageKey {
     /// used to enforce the minimum stake duration lock on voting power.
     /// Only the newly deposited portion is subject to the fresh lock.
     StakeDepositTimestamps(Address),
+    /// Per-provider map of delegator → delegated amount (issue #688).
+    ProviderDelegatedStakes(Address),
+    /// Cached total amount delegated to a provider across all delegators (issue #688).
+    ProviderTotalDelegated(Address),
 }
 
 #[contracterror]
@@ -150,6 +154,8 @@ pub enum StakeVaultError {
     InvalidSlashTier = 11,
     /// Voting power is locked because the minimum stake duration has not elapsed.
     StakeDurationNotElapsed = 12,
+    /// No delegated stake found for the given delegator/provider pair.
+    NoDelegatedStake = 13,
 }
 
 #[contract]
@@ -760,16 +766,61 @@ impl StakeVaultContract {
             return Err(StakeVaultError::NoStake);
         }
 
-        // Compute slash amount from tier percentage; min 1 stroop.
-        let slash_amount = core::cmp::max((info.balance * tier_bps) / BPS_DENOMINATOR, 1);
-        let slash_amount = core::cmp::min(slash_amount, info.balance);
+        // Compute slash on own stake; min 1 stroop if balance > 0.
+        let own_slash = if info.balance > 0 {
+            let s = core::cmp::max((info.balance * tier_bps) / BPS_DENOMINATOR, 1);
+            core::cmp::min(s, info.balance)
+        } else {
+            0
+        };
 
-        info.balance = info.balance.saturating_sub(slash_amount);
+        info.balance = info.balance.saturating_sub(own_slash);
         info.last_updated = env.ledger().timestamp();
         stakes.set(provider.clone(), info);
         env.storage()
             .persistent()
             .set(&MigrationKey::StakesV2, &stakes);
+
+        // ── Slash delegated stakes pro-rata (issue #688) ──────────────────────
+        let mut delegated: soroban_sdk::Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::ProviderDelegatedStakes(provider.clone()))
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+
+        let delegator_keys = delegated.keys();
+        let mut delegated_slash_total: i128 = 0;
+
+        for i in 0..delegator_keys.len() {
+            let delegator = delegator_keys.get(i).unwrap();
+            let d_amount = delegated.get(delegator.clone()).unwrap_or(0);
+            if d_amount == 0 {
+                continue;
+            }
+            let d_slash = core::cmp::max((d_amount * tier_bps) / BPS_DENOMINATOR, 1);
+            let d_slash = core::cmp::min(d_slash, d_amount);
+            delegated.set(delegator, d_amount.saturating_sub(d_slash));
+            delegated_slash_total = delegated_slash_total.saturating_add(d_slash);
+        }
+
+        if delegated_slash_total > 0 {
+            env.storage()
+                .persistent()
+                .set(&StorageKey::ProviderDelegatedStakes(provider.clone()), &delegated);
+
+            let total_delegated: i128 = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::ProviderTotalDelegated(provider.clone()))
+                .unwrap_or(0);
+            env.storage().persistent().set(
+                &StorageKey::ProviderTotalDelegated(provider.clone()),
+                &total_delegated.saturating_sub(delegated_slash_total),
+            );
+        }
+
+        let slash_amount = own_slash.saturating_add(delegated_slash_total);
+        let slash_amount = if slash_amount == 0 { 1 } else { slash_amount };
 
         // Event records severity tier and resulting slash amount for audit.
         #[allow(deprecated)]
@@ -795,6 +846,98 @@ impl StakeVaultContract {
             .get(&MigrationKey::StakesV2)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
         stakes.get(staker).map(|s| s.balance).unwrap_or(0)
+    }
+
+    // ── Stake delegation (issue #688) ──────────────────────────────────────────
+
+    /// Stake `amount` tokens on behalf of `provider`. The delegator's funds are
+    /// transferred into the vault but credited to `provider`'s delegated stake.
+    /// Delegated stake is tracked separately from the provider's own stake for
+    /// accounting purposes, but counts toward the provider's total stake for
+    /// signal submission and tier checks.
+    pub fn delegate_stake(
+        env: Env,
+        delegator: Address,
+        provider: Address,
+        amount: i128,
+    ) -> Result<(), StakeVaultError> {
+        delegator.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if amount <= 0 {
+            return Err(StakeVaultError::NoStake);
+        }
+
+        let token: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::StakeToken)
+            .ok_or(StakeVaultError::NotInitialized)?;
+
+        let mut delegated: soroban_sdk::Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::ProviderDelegatedStakes(provider.clone()))
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+
+        let current = delegated.get(delegator.clone()).unwrap_or(0);
+        let new_amount = current.checked_add(amount).unwrap_or(i128::MAX);
+        delegated.set(delegator.clone(), new_amount);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::ProviderDelegatedStakes(provider.clone()), &delegated);
+
+        let total_delegated: i128 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::ProviderTotalDelegated(provider.clone()))
+            .unwrap_or(0);
+        let new_total = total_delegated.checked_add(amount).unwrap_or(i128::MAX);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::ProviderTotalDelegated(provider.clone()), &new_total);
+
+        token::Client::new(&env, &token).transfer(
+            &delegator,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        #[allow(deprecated)]
+        env.events().publish(
+            (
+                Symbol::new(&env, "stake_vault"),
+                Symbol::new(&env, "stake_delegated"),
+            ),
+            (delegator, provider, amount),
+        );
+
+        Ok(())
+    }
+
+    /// Returns the amount delegated by `delegator` to `provider`.
+    pub fn get_delegated_stake(env: Env, delegator: Address, provider: Address) -> i128 {
+        let delegated: soroban_sdk::Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::ProviderDelegatedStakes(provider))
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+        delegated.get(delegator).unwrap_or(0)
+    }
+
+    /// Returns the total amount delegated to `provider` across all delegators.
+    pub fn get_total_delegated(env: Env, provider: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::ProviderTotalDelegated(provider))
+            .unwrap_or(0)
+    }
+
+    /// Returns `provider`'s effective total stake (own + all delegated).
+    pub fn get_total_stake_for_provider(env: Env, provider: Address) -> i128 {
+        let own = Self::get_stake(env.clone(), provider.clone());
+        let delegated = Self::get_total_delegated(env, provider);
+        own.saturating_add(delegated)
     }
 }
 

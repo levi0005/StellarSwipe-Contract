@@ -57,4 +57,9 @@ pub enum DataKey {
     /// Maps (user, tag_string_hash) -> Vec<position_id>.
     /// Tags are bounded to a reasonable length to prevent spam.
     UserPositionsByTag(Address, soroban_sdk::String),
+    /// Ordered list of snapshot timestamps for a user (issue #685).
+    UserSnapshotTimestamps(Address),
+    /// Portfolio value recorded at a specific timestamp for a user (issue #685).
+    /// Maps (user, timestamp) -> total portfolio value (i128).
+    PortfolioSnapshotEntry(Address, u64),
 }
