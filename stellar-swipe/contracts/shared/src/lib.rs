@@ -14,6 +14,8 @@ pub mod initializable;
 pub mod liquidity_pool;
 /// Decimal-precision scaling helpers (Issue #562).
 pub mod math;
+/// Shared emergency-pause state and guard (Issue #561).
+pub mod pausable;
 #[allow(deprecated)]
 pub mod version;
 
@@ -22,5 +24,5 @@ pub use cross_contract::{
     CrossContractVersionClient, MessageStatus, MAX_MESSAGE_SIZE,
 };
 pub use errors::{ErrorCategory, RecoveryStrategy};
-pub use math::{normalize_amount, scale_down, scale_up};
+pub use pausable::{is_paused, require_not_paused, set_paused, PausableKey};
 pub use version::{ContractKind, VersionError};

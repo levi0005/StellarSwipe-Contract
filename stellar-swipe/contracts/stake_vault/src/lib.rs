@@ -3,9 +3,10 @@
 pub mod migration;
 
 use migration::{MigrationKey, StakeInfoV2};
-use shared::initializable;
+use shared::{initializable, pausable};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, token, Address, Env, IntoVal, Symbol, Val,
+    Vec,
 };
 
 // ── Slash severity tiers ──────────────────────────────────────────────────────
@@ -110,8 +111,6 @@ pub enum StorageKey {
     /// Timestamp when a provider's stake first dropped below minimum.
     /// `None` means stake is currently at or above minimum.
     StakeBelowMinSince(Address),
-    /// Emergency pause flag — when true all stake/unstake ops are blocked.
-    Paused,
     /// Timestamp when a large-withdrawal request was initiated (per staker).
     LargeWithdrawalRequestedAt(Address),
     /// Ledger sequence at which a stake was last deposited (per staker).
@@ -170,13 +169,19 @@ impl StakeVaultContract {
         env.storage()
             .instance()
             .set(&StorageKey::SignalRegistry, &signal_registry);
-        env.storage().instance().set(&StorageKey::Paused, &false);
+        // Initialize pause state to false via shared::pausable (no event on init).
+        env.storage()
+            .instance()
+            .set(&pausable::PausableKey::Paused, &false);
         initializable::mark_initialized(&env);
     }
 
-    // ── Emergency pause ────────────────────────────────────────────────────────
+    // ── Emergency pause (shared::pausable) ────────────────────────────────────
 
     /// Admin: pause all stake/unstake operations.
+    ///
+    /// Uses the shared [`pausable`] module so pause behavior and event shape
+    /// are consistent across all contracts that adopt it (Issue #561).
     pub fn pause(env: Env) {
         let admin: Address = env
             .storage()
@@ -184,15 +189,7 @@ impl StakeVaultContract {
             .get(&StorageKey::Admin)
             .expect("not initialized");
         admin.require_auth();
-        env.storage().instance().set(&StorageKey::Paused, &true);
-        #[allow(deprecated)]
-        env.events().publish(
-            (
-                Symbol::new(&env, "stake_vault"),
-                Symbol::new(&env, "paused"),
-            ),
-            (),
-        );
+        pausable::set_paused(&env, true);
     }
 
     /// Admin: resume operations.
@@ -203,36 +200,17 @@ impl StakeVaultContract {
             .get(&StorageKey::Admin)
             .expect("not initialized");
         admin.require_auth();
-        env.storage().instance().set(&StorageKey::Paused, &false);
-        #[allow(deprecated)]
-        env.events().publish(
-            (
-                Symbol::new(&env, "stake_vault"),
-                Symbol::new(&env, "unpaused"),
-            ),
-            (),
-        );
+        pausable::set_paused(&env, false);
     }
 
     pub fn is_paused(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .get(&StorageKey::Paused)
-            .unwrap_or(false)
+        pausable::is_paused(&env)
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     fn require_not_paused(env: &Env) -> Result<(), StakeVaultError> {
-        if env
-            .storage()
-            .instance()
-            .get::<_, bool>(&StorageKey::Paused)
-            .unwrap_or(false)
-        {
-            return Err(StakeVaultError::ContractPaused);
-        }
-        Ok(())
+        pausable::require_not_paused(env).map_err(|_| StakeVaultError::ContractPaused)
     }
 
     // ── Deposit stake (records ledger for flash-loan detection) ────────────────
@@ -545,9 +523,29 @@ impl StakeVaultContract {
     /// 1. Reentrancy guard (temporary storage lock).
     /// 2. Same-ledger deposit+withdraw detection.
     /// 3. Time-lock for large withdrawals (>= LARGE_WITHDRAWAL_THRESHOLD).
+    ///
+    /// Authorization is scoped to `(staker, amount)` via `require_auth_for_args`
+    /// so a valid signature for one withdrawal amount cannot be replayed for a
+    /// different amount (Issue #563).
     pub fn withdraw_stake(env: Env, staker: Address) -> Result<i128, StakeVaultError> {
-        staker.require_auth();
         Self::require_not_paused(&env)?;
+
+        // Read the stake balance first so we can scope the auth signature to
+        // the exact amount being withdrawn, preventing signature reuse attacks.
+        let stakes: soroban_sdk::Map<Address, StakeInfoV2> = env
+            .storage()
+            .persistent()
+            .get(&MigrationKey::StakesV2)
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+        let amount_to_withdraw = stakes
+            .get(staker.clone())
+            .map(|i| i.balance)
+            .unwrap_or(0);
+
+        let mut auth_args: Vec<Val> = Vec::new(&env);
+        auth_args.push_back(staker.clone().into_val(&env));
+        auth_args.push_back(amount_to_withdraw.into_val(&env));
+        staker.require_auth_for_args(auth_args);
 
         // ── Reentrancy guard ──────────────────────────────────────────────────
         let lock_key = Symbol::new(&env, EXECUTION_LOCK);

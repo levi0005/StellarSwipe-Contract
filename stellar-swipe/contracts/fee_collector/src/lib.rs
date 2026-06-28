@@ -38,7 +38,8 @@ use storage::{
     MAX_BURN_RATE_BPS, MAX_FEE_RATE_BPS, MIN_FEE_RATE_BPS,
 };
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, IntoVal, String, Val,
+    Vec};
 
 use shared::errors::{ErrorCategory, RecoveryStrategy};
 use stellar_swipe_common::Asset;
@@ -728,11 +729,19 @@ impl FeeCollector {
 
     /// Claim all pending fee earnings for a provider and token.
     /// Returns the amount claimed (0 if no pending balance).
+    /// Claim accumulated fees for `provider` in `token`.
+    ///
+    /// Authorization is scoped to `(provider, token)` via `require_auth_for_args`
+    /// so a valid signature cannot be replayed against a different token or
+    /// redirected to a different provider (Issue #563).
     pub fn claim_fees(env: Env, provider: Address, token: Address) -> Result<i128, ContractError> {
         if !is_initialized(&env) {
             return Err(ContractError::NotInitialized);
         }
-        provider.require_auth();
+        let mut auth_args: Vec<Val> = Vec::new(&env);
+        auth_args.push_back(provider.clone().into_val(&env));
+        auth_args.push_back(token.clone().into_val(&env));
+        provider.require_auth_for_args(auth_args);
 
         let amount = get_pending_fees(&env, &provider, &token);
 

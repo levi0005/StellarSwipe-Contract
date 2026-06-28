@@ -77,6 +77,7 @@ use reputation::{
     GovernanceReputation, ReputationConfig, ReputationTier, StalenessLevel,
 };
 pub use shadow_mode::ShadowModeState;
+use shared::pausable;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Map, String, Symbol,
     Vec,
@@ -128,8 +129,6 @@ pub enum StorageKey {
     ConvictionState,
     /// Voting-power snapshot taken at proposal creation: Map<Address, i128>.
     VoteSnapshots(u64),
-    /// Global pause flag surfaced by `health_check` (admin-controlled).
-    ContractPaused,
     /// Reputation decay and stale-score configuration.
     ReputationConfig,
     /// Conviction calibration configuration (penalty, reward, cap parameters).
@@ -271,9 +270,10 @@ impl GovernanceContract {
         env.storage()
             .instance()
             .set(&StorageKey::Initialized, &true);
+        // Initialize pause state via shared::pausable (no event on init).
         env.storage()
             .instance()
-            .set(&StorageKey::ContractPaused, &false);
+            .set(&pausable::PausableKey::Paused, &false);
         track_holder(&env, &recipients.team);
         track_holder(&env, &recipients.early_investors);
         track_holder(&env, &recipients.community_rewards);
@@ -300,11 +300,7 @@ impl GovernanceContract {
             .instance()
             .get(&StorageKey::Admin)
             .unwrap_or_else(|| stellar_swipe_common::placeholder_admin(&env));
-        let is_paused = env
-            .storage()
-            .instance()
-            .get(&StorageKey::ContractPaused)
-            .unwrap_or(false);
+        let is_paused = pausable::is_paused(&env);
         stellar_swipe_common::HealthStatus {
             is_initialized: true,
             is_paused,
@@ -313,16 +309,17 @@ impl GovernanceContract {
         }
     }
 
-    /// Sets the global pause flag read by `health_check` (admin only).
+    /// Sets the global pause flag (admin only).
+    ///
+    /// Uses the shared [`pausable`] module so pause behavior and event shape
+    /// are consistent across all contracts that adopt it (Issue #561).
     pub fn set_contract_paused(
         env: Env,
         admin: Address,
         paused: bool,
     ) -> Result<(), GovernanceError> {
         require_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&StorageKey::ContractPaused, &paused);
+        pausable::set_paused(&env, paused);
         Ok(())
     }
 
@@ -1574,17 +1571,12 @@ fn is_initialized(env: &Env) -> bool {
 /// Returns `Err(GovernanceError::ContractPaused)` when the governance contract
 /// is administratively paused.  Call this at the top of every state-mutating
 /// entry-point that should be blocked during a pause.
+///
+/// Delegates to [`shared::pausable::require_not_paused`] so the pause check
+/// is consistent with all other contracts that adopt the shared module
+/// (Issue #561).
 pub(crate) fn require_not_paused(env: &Env) -> Result<(), GovernanceError> {
-    let paused: bool = env
-        .storage()
-        .instance()
-        .get(&StorageKey::ContractPaused)
-        .unwrap_or(false);
-    if paused {
-        Err(GovernanceError::ContractPaused)
-    } else {
-        Ok(())
-    }
+    pausable::require_not_paused(env).map_err(|_| GovernanceError::ContractPaused)
 }
 
 fn metadata(env: &Env) -> Result<TokenMetadata, GovernanceError> {
