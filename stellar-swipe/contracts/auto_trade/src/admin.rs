@@ -13,6 +13,9 @@ pub const RATE_LIMIT_DURATION_SECONDS: u64 = 3600;
 /// 48 hours in seconds
 const PENDING_ADMIN_EXPIRY_LEDGERS: u64 = 48 * 60 * 60;
 
+/// Default inactivity window: 30 days in seconds.
+pub const DEFAULT_INACTIVITY_WINDOW_SECS: u64 = 30 * 24 * 60 * 60;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum AdminStorageKey {
@@ -28,6 +31,9 @@ pub enum AdminStorageKey {
     PendingAdmin,
     PendingAdminExpiry,
     PreventSelfDestruct,
+    // Dead man's switch
+    LastAdminActionAt,
+    InactivityWindowSecs,
 }
 
 pub fn init_admin(env: &Env, admin: Address) {
@@ -74,6 +80,99 @@ pub fn require_admin(env: &Env, caller: &Address) -> Result<(), AutoTradeError> 
         return Err(AutoTradeError::Unauthorized);
     }
     caller.require_auth();
+    // Record timestamp so the dead man's switch knows the admin is still active.
+    update_last_admin_action(env);
+    Ok(())
+}
+
+// ── Dead man's switch ────────────────────────────────────────────────────────
+
+/// Record the current ledger timestamp as the most recent qualifying admin action.
+/// Called automatically from `require_admin` on every successful admin operation.
+pub fn update_last_admin_action(env: &Env) {
+    env.storage()
+        .instance()
+        .set(&AdminStorageKey::LastAdminActionAt, &env.ledger().timestamp());
+}
+
+/// Get the timestamp of the last qualifying admin action (0 if never recorded).
+pub fn get_last_admin_action_at(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&AdminStorageKey::LastAdminActionAt)
+        .unwrap_or(0u64)
+}
+
+/// Configure the inactivity window (admin only).
+/// After `window_secs` of no admin activity anyone may call `trigger_inactivity_pause`.
+pub fn set_inactivity_window(
+    env: &Env,
+    caller: &Address,
+    window_secs: u64,
+) -> Result<(), AutoTradeError> {
+    require_admin(env, caller)?;
+    env.storage()
+        .instance()
+        .set(&AdminStorageKey::InactivityWindowSecs, &window_secs);
+    Ok(())
+}
+
+/// Get the configured inactivity window in seconds (defaults to 30 days).
+pub fn get_inactivity_window(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&AdminStorageKey::InactivityWindowSecs)
+        .unwrap_or(DEFAULT_INACTIVITY_WINDOW_SECS)
+}
+
+/// Any caller may invoke this once the inactivity window has elapsed since the
+/// last qualifying admin action.  On success it pauses all sensitive operations
+/// (CAT_ALL) until an admin explicitly unpauses via `unpause_category`.
+///
+/// A fresh admin action (which goes through `require_admin`) automatically resets
+/// the `LastAdminActionAt` timestamp; the admin can then call `unpause_category`
+/// to lift the pause through the normal path.
+///
+/// Errors:
+/// - `InactivityWindowNotElapsed` — the window has not yet elapsed.
+pub fn trigger_inactivity_pause(env: &Env, caller: &Address) -> Result<(), AutoTradeError> {
+    caller.require_auth();
+
+    let last_action = get_last_admin_action_at(env);
+    let window = get_inactivity_window(env);
+    let now = env.ledger().timestamp();
+
+    if last_action > 0 && now < last_action + window {
+        return Err(AutoTradeError::InactivityWindowNotElapsed);
+    }
+    // last_action == 0 means the contract was never interacted with by admin;
+    // treat that as the window having elapsed (fail-safe open).
+
+    let pause_state = PauseState {
+        paused: true,
+        paused_at: now,
+        auto_unpause_at: None,
+        reason: soroban_sdk::String::from_str(env, "dead_mans_switch_triggered"),
+    };
+
+    let mut states = get_pause_states(env);
+    states.set(
+        soroban_sdk::String::from_str(env, CAT_ALL),
+        pause_state,
+    );
+    env.storage()
+        .instance()
+        .set(&AdminStorageKey::PauseStates, &states);
+
+    #[allow(deprecated)]
+    env.events().publish(
+        (
+            soroban_sdk::Symbol::new(env, "inactivity_pause_triggered"),
+            caller.clone(),
+        ),
+        now,
+    );
+
     Ok(())
 }
 

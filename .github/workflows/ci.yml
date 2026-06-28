@@ -130,3 +130,92 @@ jobs:
           name: soroban-wasm-optimized
           path: stellar-swipe/target/wasm-optimized/*.wasm
           if-no-files-found: error
+
+  reproducible-build:
+    name: Reproducible WASM build check
+    runs-on: ubuntu-latest
+    # Run in parallel with the main CI job; no dependency on it.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # No shared Rust cache between the two builds so each starts clean.
+      # We intentionally skip Swatinem/rust-cache here to avoid any
+      # cached incremental state that could mask non-determinism.
+
+      - name: Install Stellar CLI
+        run: |
+          set -euo pipefail
+          version="25.2.0"
+          install_dir="$HOME/.local/bin"
+          mkdir -p "$install_dir"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          curl -fL \
+            "https://github.com/stellar/stellar-cli/releases/download/v${version}/stellar-cli-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C "$install_dir"
+          chmod +x "$install_dir/stellar"
+          stellar --version
+
+      # First build — output goes to target/wasm-optimized/ (the default).
+      - name: Build 1 — optimized WASM
+        env:
+          # Remap absolute source paths to a fixed prefix so they don't embed
+          # the runner's working directory and break reproducibility.
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/workspace"
+        run: |
+          cd stellar-swipe
+          chmod +x scripts/build.sh
+          OPT_DIR=target/wasm-build-1 ./scripts/build.sh
+
+      # Second build — completely clean incremental dir, separate output dir.
+      - name: Build 2 — optimized WASM (clean incremental state)
+        env:
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/workspace"
+          CARGO_TARGET_DIR: target-build-2
+        run: |
+          cd stellar-swipe
+          OPT_DIR=target/wasm-build-2 ./scripts/build.sh
+
+      # Compare SHA-256 hashes of every WASM produced by both builds.
+      # Any mismatch causes the job to fail with a clear diff.
+      - name: Compare WASM hashes (fail on mismatch)
+        run: |
+          set -euo pipefail
+          cd stellar-swipe
+          echo "=== Build 1 hashes ==="
+          sha256sum target/wasm-build-1/*.wasm | tee /tmp/build1.sha256
+          echo ""
+          echo "=== Build 2 hashes ==="
+          sha256sum target/wasm-build-2/*.wasm | tee /tmp/build2.sha256
+
+          # Strip directory prefix so we compare filenames only.
+          sed -i 's|target/wasm-build-1/||g' /tmp/build1.sha256
+          sed -i 's|target/wasm-build-2/||g' /tmp/build2.sha256
+
+          if diff /tmp/build1.sha256 /tmp/build2.sha256; then
+            echo ""
+            echo "✓ All WASM hashes match — build is reproducible."
+          else
+            echo ""
+            echo "✗ WASM hash mismatch — non-deterministic build detected!"
+            echo "  Fix: ensure no timestamps, absolute paths, or random"
+            echo "  seeds are embedded (use RUSTFLAGS=--remap-path-prefix)."
+            exit 1
+          fi
+
+      # Record the verified hashes as a CI artifact so they can be attached
+      # to release notes.  Downstream verification process:
+      #   1. Download this artifact from the release workflow run.
+      #   2. Build the same commit locally with the same RUSTFLAGS.
+      #   3. sha256sum your local *.wasm and diff against these hashes.
+      - name: Upload verified WASM hashes artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: soroban-wasm-verified-hashes
+          path: /tmp/build1.sha256
+          if-no-files-found: error

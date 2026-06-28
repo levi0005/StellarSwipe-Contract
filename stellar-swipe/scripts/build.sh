@@ -25,8 +25,11 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
 TARGET="wasm32-unknown-unknown"
-RELEASE_DIR="target/$TARGET/release"
-DEBUG_DIR="target/$TARGET/debug"
+# Honour CARGO_TARGET_DIR so the reproducible-build CI job can point each
+# build at its own isolated output directory.
+CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-target}"
+RELEASE_DIR="$CARGO_TARGET_ROOT/$TARGET/release"
+DEBUG_DIR="$CARGO_TARGET_ROOT/$TARGET/debug"
 OPT_DIR="${OPT_DIR:-target/wasm-optimized}"
 
 compare=false

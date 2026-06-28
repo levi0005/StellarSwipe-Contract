@@ -128,4 +128,16 @@ impl AutoTradeError {
     pub const BridgePaused: AutoTradeError = AutoTradeError::SystemError;
     pub const RecoveryNotFound: AutoTradeError = AutoTradeError::SystemError;
     pub const RecoveryIncomplete: AutoTradeError = AutoTradeError::SystemError;
+
+    // ── Escrow (per-trade isolated custody) ──────────────────────────────────
+    /// No escrow record exists for the given trade_id.
+    pub const EscrowNotFound: AutoTradeError = AutoTradeError::StrategyNotFound;
+    /// An active escrow already exists for this trade_id (double-initiation guard).
+    pub const EscrowAlreadyActive: AutoTradeError = AutoTradeError::PositionAlreadyExists;
+    /// Escrow is already Settled or Cancelled; double-release attempt rejected.
+    pub const EscrowAlreadyClosed: AutoTradeError = AutoTradeError::SystemError;
+
+    // ── Dead man's switch ─────────────────────────────────────────────────────
+    /// Inactivity window has not elapsed yet; trigger is premature.
+    pub const InactivityWindowNotElapsed: AutoTradeError = AutoTradeError::NotPaused;
 }
