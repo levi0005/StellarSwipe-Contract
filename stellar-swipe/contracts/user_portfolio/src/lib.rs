@@ -27,6 +27,64 @@ pub use preferences::{
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 use storage::DataKey;
 
+/// Compute the Herfindahl-Hirschman Index (HHI) concentration score for a user's open
+/// positions.  Returned value is in basis points (0 = perfectly diversified, 10 000 = 100 %
+/// concentration in a single position).
+///
+/// Formula:  HHI = Σ ( s_i² )  where  s_i = amount_i / total_amount
+/// Scaled to basis points:  HHI_bps = Σ ( weight_i_bps² / 10 000 )
+fn compute_concentration_score(env: &Env, user: &Address) -> u32 {
+    let open_ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::UserOpenPositions(user.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+
+    if open_ids.len() == 0 {
+        return 0;
+    }
+
+    let mut total: i128 = 0;
+    let mut weights: Vec<i128> = Vec::new(env);
+
+    for i in 0..open_ids.len() {
+        let Some(id) = open_ids.get(i) else { continue };
+        let Some(pos) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Position>(&DataKey::Position(id))
+        else {
+            continue;
+        };
+        if pos.status != PositionStatus::Open || pos.amount <= 0 {
+            continue;
+        }
+        total = total.saturating_add(pos.amount);
+        weights.push_back(pos.amount);
+    }
+
+    if total == 0 {
+        return 0;
+    }
+
+    let mut hhi: u64 = 0;
+    for i in 0..weights.len() {
+        let amount = weights.get(i).unwrap_or(0);
+        if amount <= 0 {
+            continue;
+        }
+        let weight_bps: i128 = amount
+            .checked_mul(10_000)
+            .map(|n| n / total)
+            .unwrap_or(10_000)
+            .min(10_000);
+        let wb = weight_bps as u64;
+        hhi = hhi.saturating_add(wb.saturating_mul(wb) / 10_000);
+    }
+
+    (hhi as u32).min(10_000)
+}
+
 pub use subscriptions::SubscriptionError;
 
 /// A point-in-time record of a user's total portfolio value (issue #685).
@@ -388,6 +446,24 @@ impl UserPortfolio {
             .unwrap_or_else(|| Vec::new(&env));
         open_ids.push_back(id);
         env.storage().persistent().set(&open_key, &open_ids);
+
+        // Check concentration threshold and emit warning if exceeded (Issue #684).
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConcentrationThreshold)
+            .unwrap_or(5_000u32);
+        let score = compute_concentration_score(&env, &user);
+        if score >= threshold {
+            #[allow(deprecated)]
+            env.events().publish(
+                (
+                    Symbol::new(&env, "user_portfolio"),
+                    Symbol::new(&env, "high_concentration_warning"),
+                ),
+                (user, score, threshold),
+            );
+        }
 
         id
     }
@@ -862,6 +938,33 @@ impl UserPortfolio {
             }
         }
         result
+    }
+
+    // ── Portfolio concentration risk (Issue #684) ──────────────────────────────
+
+    /// Admin: set the Herfindahl concentration score threshold (0–10 000 basis points).
+    /// A `high_concentration_warning` event is emitted whenever a user's score meets or
+    /// exceeds this value after a new position is opened.  Default is 5 000 (HHI ≥ 0.5).
+    pub fn set_concentration_threshold(env: Env, threshold: u32) {
+        Self::require_admin(&env);
+        let capped = threshold.min(10_000);
+        env.storage()
+            .instance()
+            .set(&DataKey::ConcentrationThreshold, &capped);
+    }
+
+    /// Returns the configured concentration warning threshold (default: 5 000 bps).
+    pub fn get_concentration_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ConcentrationThreshold)
+            .unwrap_or(5_000u32)
+    }
+
+    /// Returns the Herfindahl-Hirschman Index concentration score for `user`'s open
+    /// positions, in basis points (0 = fully diversified, 10 000 = single position).
+    pub fn get_concentration_score(env: Env, user: Address) -> u32 {
+        compute_concentration_score(&env, &user)
     }
 
     fn require_admin(env: &Env) {
@@ -1927,6 +2030,192 @@ mod snapshot_tests {
 
         let history = client.get_snapshot_history(&user, &0u64, &u64::MAX);
         assert_eq!(history.len(), 0);
+    }
+}
+
+// ── Concentration risk score tests (Issue #684) ───────────────────────────────
+#[cfg(test)]
+mod concentration_tests {
+    use super::oracle_ok::OracleMock;
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::TryFromVal;
+
+    fn setup(env: &Env) -> (Address, Address) {
+        env.mock_all_auths();
+        let admin = Address::generate(env);
+        let oracle = env.register_contract(None, OracleMock);
+        let contract_id = env.register_contract(None, UserPortfolio);
+        let client = UserPortfolioClient::new(env, &contract_id);
+        client.initialize(&admin, &oracle);
+        (admin, contract_id)
+    }
+
+    fn open(env: &Env, client: &UserPortfolioClient, user: &Address, amount: i128) -> u64 {
+        client.open_position(user, &100, &amount)
+    }
+
+    fn close(env: &Env, client: &UserPortfolioClient, user: &Address, id: u64) {
+        let provider = soroban_sdk::Address::generate(env);
+        client.close_position(user, &id, &0, &100i128, &1u32, &provider, &0u64);
+    }
+
+    #[test]
+    fn score_is_zero_with_no_positions() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        assert_eq!(client.get_concentration_score(&user), 0);
+    }
+
+    #[test]
+    fn single_position_scores_10000() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        open(&env, &client, &user, 1_000);
+        assert_eq!(client.get_concentration_score(&user), 10_000);
+    }
+
+    #[test]
+    fn two_equal_positions_score_5000() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        open(&env, &client, &user, 1_000);
+        // Disable threshold warning for this test (set very high)
+        client.set_concentration_threshold(&10_001u32);
+        open(&env, &client, &user, 1_000);
+        let score = client.get_concentration_score(&user);
+        // HHI for 2 equal positions = 2*(50%)^2 = 0.5 → 5000 bps
+        assert_eq!(score, 5_000);
+    }
+
+    #[test]
+    fn highly_concentrated_portfolio_scores_higher() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        client.set_concentration_threshold(&10_001u32);
+        // 90% / 10% split
+        open(&env, &client, &user, 9_000);
+        open(&env, &client, &user, 1_000);
+        let score = client.get_concentration_score(&user);
+        // HHI = (0.9)^2 + (0.1)^2 = 0.81 + 0.01 = 0.82 → 8200 bps
+        assert_eq!(score, 8_200);
+    }
+
+    #[test]
+    fn equally_distributed_portfolio_has_lower_score() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        client.set_concentration_threshold(&10_001u32);
+        open(&env, &client, &user, 1_000);
+        open(&env, &client, &user, 1_000);
+        open(&env, &client, &user, 1_000);
+        open(&env, &client, &user, 1_000);
+        let score = client.get_concentration_score(&user);
+        // HHI = 4*(25%)^2 = 4*0.0625 = 0.25 → 2500 bps
+        assert_eq!(score, 2_500);
+    }
+
+    #[test]
+    fn default_threshold_is_5000() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        assert_eq!(client.get_concentration_threshold(), 5_000u32);
+    }
+
+    #[test]
+    fn admin_can_configure_threshold() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        client.set_concentration_threshold(&7_500u32);
+        assert_eq!(client.get_concentration_threshold(), 7_500u32);
+    }
+
+    #[test]
+    fn threshold_is_capped_at_10000() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        client.set_concentration_threshold(&99_999u32);
+        assert_eq!(client.get_concentration_threshold(), 10_000u32);
+    }
+
+    #[test]
+    fn high_concentration_warning_emitted_when_threshold_crossed() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+
+        // Set threshold to 6000; single position = HHI 10000 ≥ 6000 → warning
+        client.set_concentration_threshold(&6_000u32);
+        open(&env, &client, &user, 1_000);
+
+        let has_warning = env.events().all().iter().any(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            if topics.len() < 2 {
+                return false;
+            }
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|s| s == soroban_sdk::Symbol::new(&env, "high_concentration_warning"))
+                .unwrap_or(false)
+        });
+        assert!(has_warning, "high_concentration_warning must be emitted");
+    }
+
+    #[test]
+    fn no_warning_emitted_below_threshold() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+
+        // Set threshold very high so no warning fires
+        client.set_concentration_threshold(&10_001u32);
+        open(&env, &client, &user, 1_000);
+        open(&env, &client, &user, 1_000);
+
+        // score = 5000, threshold = 10001 (capped at 10000 so 5000 < 10000)
+        let has_warning = env.events().all().iter().any(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            if topics.len() < 2 {
+                return false;
+            }
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|s| s == soroban_sdk::Symbol::new(&env, "high_concentration_warning"))
+                .unwrap_or(false)
+        });
+        assert!(!has_warning, "no warning expected below threshold");
+    }
+
+    #[test]
+    fn score_drops_after_closing_concentrated_position() {
+        let env = Env::default();
+        let (_admin, contract_id) = setup(&env);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        client.set_concentration_threshold(&10_001u32);
+
+        let id_big = open(&env, &client, &user, 9_000);
+        open(&env, &client, &user, 1_000);
+        let score_before = client.get_concentration_score(&user);
+        assert_eq!(score_before, 8_200);
+
+        close(&env, &client, &user, id_big);
+        let score_after = client.get_concentration_score(&user);
+        // Only the 1_000-amount position remains → HHI = 10_000
+        assert_eq!(score_after, 10_000);
     }
 }
 

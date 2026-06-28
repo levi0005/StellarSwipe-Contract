@@ -20,7 +20,8 @@ use risk_gates::{
 };
 use sdex::{execute_sdex_swap, min_received_from_slippage};
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Bytes, Env, IntoVal, String, Symbol, Val, Vec,
+    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    Val, Vec,
 };
 
 use stellar_swipe_common::replay_protection::verify_and_commit;
@@ -489,6 +490,8 @@ fn execute_market_copy_trade(
             },
         );
     }
+
+    record_trade_receipt(env, &user, &token, effective_amount);
 
     env.storage().temporary().remove(&lock_key);
     Ok(())
@@ -1449,6 +1452,18 @@ impl TradeExecutorContract {
         }
 
         Ok(results)
+    }
+
+    // ── Trade receipt (Issue #683) ────────────────────────────────────────────
+
+    /// Returns the stored SHA-256 receipt hash for `trade_receipt_id`, or `None` if not found.
+    ///
+    /// The hash covers `(user, asset, amount, price, timestamp)` and can be recomputed
+    /// off-chain from the `trade_receipt` event data to verify the trade's authenticity.
+    pub fn get_trade_receipt(env: Env, trade_receipt_id: u64) -> Option<BytesN<32>> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::TradeReceiptHash(trade_receipt_id))
     }
 
     // ── DCA copy trading (Issue #360) ─────────────────────────────────────────

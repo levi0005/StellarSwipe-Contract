@@ -1541,3 +1541,129 @@ fn test_limit_order_persistence() {
     let mock = MockUserPortfolioClient::new(&env, &portfolio_id);
     assert_eq!(mock.get_open_position_count(&user), 2);
 }
+
+// ── Trade receipt hash tests (Issue #683) ─────────────────────────────────────
+
+#[test]
+fn trade_receipt_hash_is_stored_after_execute_copy_trade() {
+    let (env, exec_id, _, user, _, token) = setup_with_balance(10_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    exec.execute_copy_trade(
+        &user,
+        &token,
+        &TRADE_AMOUNT,
+        &None,
+        &OrderType::Market,
+        &None,
+        &1u64,
+        &test_tx_hash(&env, 42),
+        &far_future(&env),
+    );
+
+    let receipt = exec.get_trade_receipt(&1u64);
+    assert!(receipt.is_some(), "receipt hash must be stored after a trade");
+    let hash = receipt.unwrap();
+    assert_ne!(hash, soroban_sdk::BytesN::from_array(&env, &[0u8; 32]));
+}
+
+#[test]
+fn trade_receipt_hash_is_deterministic_for_same_inputs() {
+    use crate::compute_trade_hash;
+    let env = Env::default();
+    env.mock_all_auths();
+    let user = Address::generate(&env);
+    let asset = Address::generate(&env);
+
+    let h1 = compute_trade_hash(&env, &user, &asset, 1_000_000, 5_000, 1_700_000_000);
+    let h2 = compute_trade_hash(&env, &user, &asset, 1_000_000, 5_000, 1_700_000_000);
+    assert_eq!(h1, h2, "same inputs must produce the same hash");
+}
+
+#[test]
+fn trade_receipt_hash_changes_when_amount_changes() {
+    use crate::compute_trade_hash;
+    let env = Env::default();
+    env.mock_all_auths();
+    let user = Address::generate(&env);
+    let asset = Address::generate(&env);
+
+    let h1 = compute_trade_hash(&env, &user, &asset, 1_000_000, 5_000, 1_700_000_000);
+    let h2 = compute_trade_hash(&env, &user, &asset, 2_000_000, 5_000, 1_700_000_000);
+    assert_ne!(h1, h2, "changing amount must change the hash");
+}
+
+#[test]
+fn trade_receipt_hash_changes_when_price_changes() {
+    use crate::compute_trade_hash;
+    let env = Env::default();
+    env.mock_all_auths();
+    let user = Address::generate(&env);
+    let asset = Address::generate(&env);
+
+    let h1 = compute_trade_hash(&env, &user, &asset, 1_000_000, 5_000, 1_700_000_000);
+    let h2 = compute_trade_hash(&env, &user, &asset, 1_000_000, 9_999, 1_700_000_000);
+    assert_ne!(h1, h2, "changing price must change the hash");
+}
+
+#[test]
+fn trade_receipt_hash_changes_when_user_changes() {
+    use crate::compute_trade_hash;
+    let env = Env::default();
+    env.mock_all_auths();
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let asset = Address::generate(&env);
+
+    let h1 = compute_trade_hash(&env, &user_a, &asset, 1_000_000, 5_000, 1_700_000_000);
+    let h2 = compute_trade_hash(&env, &user_b, &asset, 1_000_000, 5_000, 1_700_000_000);
+    assert_ne!(h1, h2, "different users must produce different hashes");
+}
+
+#[test]
+fn trade_receipt_hash_changes_when_timestamp_changes() {
+    use crate::compute_trade_hash;
+    let env = Env::default();
+    env.mock_all_auths();
+    let user = Address::generate(&env);
+    let asset = Address::generate(&env);
+
+    let h1 = compute_trade_hash(&env, &user, &asset, 1_000_000, 5_000, 1_700_000_000);
+    let h2 = compute_trade_hash(&env, &user, &asset, 1_000_000, 5_000, 1_700_000_001);
+    assert_ne!(h1, h2, "different timestamps must produce different hashes");
+}
+
+#[test]
+fn trade_receipt_ids_are_monotonically_incremented() {
+    let (env, exec_id, _, user, _, token) = setup_with_balance(50_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    for i in 1u64..=3 {
+        exec.execute_copy_trade(
+            &user,
+            &token,
+            &TRADE_AMOUNT,
+            &None,
+            &OrderType::Market,
+            &None,
+            &i,
+            &test_tx_hash(&env, i as u8),
+            &far_future(&env),
+        );
+        assert!(exec.get_trade_receipt(&i).is_some(), "receipt {i} missing");
+    }
+    // Receipts 1, 2, 3 must all be distinct hashes.
+    let h1 = exec.get_trade_receipt(&1u64).unwrap();
+    let h2 = exec.get_trade_receipt(&2u64).unwrap();
+    let h3 = exec.get_trade_receipt(&3u64).unwrap();
+    // Timestamps and nonces differ per trade, so hashes must differ.
+    assert_ne!(h1, h2);
+    assert_ne!(h2, h3);
+}
+
+#[test]
+fn get_trade_receipt_returns_none_for_unknown_id() {
+    let (env, exec_id, _, _, _, _) = setup_with_balance(1_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    assert!(exec.get_trade_receipt(&999u64).is_none());
+}

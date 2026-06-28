@@ -62,4 +62,7 @@ pub enum DataKey {
     /// Portfolio value recorded at a specific timestamp for a user (issue #685).
     /// Maps (user, timestamp) -> total portfolio value (i128).
     PortfolioSnapshotEntry(Address, u64),
+    /// Admin-configurable Herfindahl concentration score threshold (issue #684).
+    /// Expressed in basis points (0–10 000). Default: 5 000 (HHI ≥ 0.5).
+    ConcentrationThreshold,
 }
