@@ -1570,6 +1570,7 @@ version = "0.0.0"
 dependencies = [
  "shared",
  "soroban-sdk",
+ "stellar_swipe_common",
 ]
 
 [[package]]
@@ -1611,6 +1612,7 @@ dependencies = [
 name = "stellar_swipe_common"
 version = "0.0.0"
 dependencies = [
+ "shared",
  "soroban-sdk",
 ]
 

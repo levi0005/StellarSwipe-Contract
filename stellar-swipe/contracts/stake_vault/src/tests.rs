@@ -98,6 +98,72 @@ fn withdraw_stake_transfers_balance() {
     assert_eq!(client.get_stake(&staker), 0);
 }
 
+// ── Withdrawal rate limiting (Issue #595: shared rate limiter) ─────────────────
+//
+// withdraw_stake adopts the shared rate limiter via common::rate_limit's
+// StakeChange action (default: 5 per day), giving stake_vault rate-limiting
+// protection it previously had none of.
+
+#[test]
+fn withdraw_stake_within_daily_limit_succeeds() {
+    let (env, vault_id, token, _admin, _registry) = setup();
+    let staker = Address::generate(&env);
+    let per_withdrawal: i128 = 1_000_000;
+
+    StellarAssetClient::new(&env, &token).mint(&vault_id, &(per_withdrawal * 5));
+    let client = StakeVaultContractClient::new(&env, &vault_id);
+
+    for _ in 0..5 {
+        seed_v2_stake(&env, &vault_id, &staker, per_withdrawal, 0);
+        assert_eq!(client.withdraw_stake(&staker), per_withdrawal);
+    }
+}
+
+#[test]
+fn withdraw_stake_over_daily_limit_is_rejected() {
+    let (env, vault_id, token, _admin, _registry) = setup();
+    let staker = Address::generate(&env);
+    let per_withdrawal: i128 = 1_000_000;
+
+    StellarAssetClient::new(&env, &token).mint(&vault_id, &(per_withdrawal * 6));
+    let client = StakeVaultContractClient::new(&env, &vault_id);
+
+    for _ in 0..5 {
+        seed_v2_stake(&env, &vault_id, &staker, per_withdrawal, 0);
+        client.withdraw_stake(&staker);
+    }
+
+    // 6th withdrawal within the same day exceeds the default StakeChange limit.
+    seed_v2_stake(&env, &vault_id, &staker, per_withdrawal, 0);
+    let err = client.try_withdraw_stake(&staker);
+    assert_eq!(err, Err(Ok(StakeVaultError::RateLimitExceeded)));
+}
+
+#[test]
+fn withdraw_stake_limit_resets_after_window_elapses() {
+    use soroban_sdk::testutils::Ledger;
+
+    let (env, vault_id, token, _admin, _registry) = setup();
+    let staker = Address::generate(&env);
+    let per_withdrawal: i128 = 1_000_000;
+
+    StellarAssetClient::new(&env, &token).mint(&vault_id, &(per_withdrawal * 6));
+    let client = StakeVaultContractClient::new(&env, &vault_id);
+
+    for _ in 0..5 {
+        seed_v2_stake(&env, &vault_id, &staker, per_withdrawal, 0);
+        client.withdraw_stake(&staker);
+    }
+    seed_v2_stake(&env, &vault_id, &staker, per_withdrawal, 0);
+    assert!(client.try_withdraw_stake(&staker).is_err());
+
+    // Advance past the 24h window — the limit resets.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 86_400 + 1);
+    seed_v2_stake(&env, &vault_id, &staker, per_withdrawal, 0);
+    assert_eq!(client.withdraw_stake(&staker), per_withdrawal);
+}
+
 #[test]
 fn withdraw_stake_no_stake_returns_error() {
     let (env, vault_id, _token, _admin, _registry) = setup();

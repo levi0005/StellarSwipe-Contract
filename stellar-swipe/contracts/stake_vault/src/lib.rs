@@ -562,6 +562,15 @@ impl StakeVaultContract {
         let result = Self::do_withdraw(&env, &staker);
 
         env.storage().temporary().remove(&lock_key);
+
+        if result.is_ok() {
+            stellar_swipe_common::rate_limit::record_action(
+                &env,
+                &staker,
+                stellar_swipe_common::rate_limit::ActionType::StakeChange,
+            );
+        }
+
         result
     }
 

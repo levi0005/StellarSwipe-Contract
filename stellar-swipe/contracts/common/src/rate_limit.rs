@@ -1,9 +1,15 @@
 //! Per-user rate limiting for key contract actions.
 //!
+//! The core window/count mechanism is delegated to [`shared::rate_limiter`], the
+//! single shared rate-limiter consolidated in Issue #595 (previously this module
+//! and `auto_trade::rate_limit` each maintained their own window-tracking logic).
+//! This module adds the action-type config registry and trust-score tiering on
+//! top of that shared mechanism.
+//!
 //! Storage layout:
-//!   RateLimitTimestamps(Address, ActionType) -> Vec<u64>  (sliding window, max 100 entries)
-//!   RateLimitConfig(ActionType)              -> RateLimitConfig
-//!   UserFirstAction(Address)                 -> u64  (timestamp of first recorded action)
+//!   RateLimitConfig(ActionType) -> RateLimitConfig
+//!   UserFirstAction(Address)    -> u64  (timestamp of first recorded action)
+//!   (window/count state lives in `shared::rate_limiter`, keyed by action symbol + user)
 //!
 //! Tier multipliers:
 //!   New user  (< 30 days): 1x
@@ -12,20 +18,17 @@
 #![allow(dead_code)]
 
 use crate::constants::{SECONDS_PER_DAY, SECONDS_PER_HOUR};
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
+use shared::rate_limiter;
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const ESTABLISHED_DAYS: u64 = 30;
 const ESTABLISHED_TRUST_SCORE: u32 = 60;
-const MAX_STORED_TIMESTAMPS: u32 = 100;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RateLimitError {
-    Exceeded,
-}
+pub use rate_limiter::RateLimitError;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,19 +49,20 @@ pub struct RateLimitConfig {
 }
 
 #[contracttype]
-#[derive(Clone, Debug)]
-pub struct RateLimitWindow {
-    pub window_start: u64,
-    pub count: u32,
-}
-
-#[contracttype]
 #[derive(Clone)]
 pub enum RateLimitKey {
-    Timestamps(Address, ActionType),
-    Window(Address, ActionType),
     Config(ActionType),
     UserFirstAction(Address),
+}
+
+/// Symbol identifying `action` as a `shared::rate_limiter` use case.
+fn action_symbol(action: &ActionType) -> Symbol {
+    match action {
+        ActionType::SignalSubmission => symbol_short!("sig_sub"),
+        ActionType::TradeExecution => symbol_short!("trade"),
+        ActionType::StakeChange => symbol_short!("stake"),
+        ActionType::FollowAction => symbol_short!("follow"),
+    }
 }
 
 // ── Default configs ──────────────────────────────────────────────────────────
@@ -97,62 +101,6 @@ pub fn set_config(env: &Env, action: ActionType, config: RateLimitConfig) {
     env.storage()
         .instance()
         .set(&RateLimitKey::Config(action), &config);
-}
-
-fn get_window(env: &Env, user: &Address, action: &ActionType) -> Option<RateLimitWindow> {
-    env.storage()
-        .persistent()
-        .get(&RateLimitKey::Window(user.clone(), action.clone()))
-}
-
-fn save_window(env: &Env, user: &Address, action: &ActionType, window: &RateLimitWindow) {
-    env.storage()
-        .persistent()
-        .set(&RateLimitKey::Window(user.clone(), action.clone()), window);
-}
-
-/// O(1) counter-based window count; migrates legacy timestamp vectors on first read.
-fn current_window_count(
-    env: &Env,
-    user: &Address,
-    action: &ActionType,
-    config: &RateLimitConfig,
-    now: u64,
-) -> u32 {
-    if let Some(window) = get_window(env, user, action) {
-        if now.saturating_sub(window.window_start) >= config.window_secs {
-            return 0;
-        }
-        return window.count;
-    }
-
-    // Legacy migration: count timestamps still inside the window once, then discard.
-    let timestamps = get_timestamps(env, user, action);
-    let count = timestamps
-        .iter()
-        .filter(|t| now.saturating_sub(*t) < config.window_secs)
-        .count() as u32;
-    if count > 0 {
-        let window = RateLimitWindow {
-            window_start: now,
-            count,
-        };
-        save_window(env, user, action, &window);
-    }
-    count
-}
-
-fn get_timestamps(env: &Env, user: &Address, action: &ActionType) -> Vec<u64> {
-    env.storage()
-        .persistent()
-        .get(&RateLimitKey::Timestamps(user.clone(), action.clone()))
-        .unwrap_or_else(|| Vec::new(env))
-}
-
-fn save_timestamps(env: &Env, user: &Address, action: &ActionType, ts: &Vec<u64>) {
-    env.storage()
-        .persistent()
-        .set(&RateLimitKey::Timestamps(user.clone(), action.clone()), ts);
 }
 
 fn get_first_action(env: &Env, user: &Address) -> u64 {
@@ -201,15 +149,16 @@ pub fn check_rate_limit(
     let first_action = get_first_action(env, user);
 
     let max = effective_max(&config, first_action, now, trust_score);
+    let use_case = action_symbol(&action);
 
-    let recent_count = current_window_count(env, user, &action, &config, now);
-
-    if recent_count >= max {
-        emit_rate_limit_hit(env, user.clone(), action, recent_count, max);
-        return Err(RateLimitError::Exceeded);
+    match rate_limiter::check(env, &use_case, user, config.window_secs, max) {
+        Ok(_) => Ok(()),
+        Err(rate_limiter::RateLimitError::Exceeded) => {
+            let recent_count = rate_limiter::current_count(env, &use_case, user, config.window_secs);
+            emit_rate_limit_hit(env, user.clone(), action, recent_count, max);
+            Err(RateLimitError::Exceeded)
+        }
     }
-
-    Ok(())
 }
 
 /// Record that `user` performed `action` right now.
@@ -219,30 +168,14 @@ pub fn record_action(env: &Env, user: &Address, action: ActionType) {
     record_first_action_if_new(env, user, now);
 
     let config = get_config(env, &action);
-
-    let mut window = get_window(env, user, &action).unwrap_or(RateLimitWindow {
-        window_start: now,
-        count: 0,
-    });
-
-    if now.saturating_sub(window.window_start) >= config.window_secs {
-        window.window_start = now;
-        window.count = 0;
-    }
-
-    window.count = window.count.saturating_add(1);
-    save_window(env, user, &action, &window);
+    let use_case = action_symbol(&action);
+    rate_limiter::record(env, &use_case, user, config.window_secs);
 }
 
 // ── Event ────────────────────────────────────────────────────────────────────
 
 fn emit_rate_limit_hit(env: &Env, user: Address, action: ActionType, count: u32, limit: u32) {
-    let action_sym: Symbol = match action {
-        ActionType::SignalSubmission => symbol_short!("sig_sub"),
-        ActionType::TradeExecution => symbol_short!("trade"),
-        ActionType::StakeChange => symbol_short!("stake"),
-        ActionType::FollowAction => symbol_short!("follow"),
-    };
+    let action_sym = action_symbol(&action);
     let topics = (Symbol::new(env, "rate_limit_hit"),);
     env.events()
         .publish(topics, (user, action_sym, count, limit));

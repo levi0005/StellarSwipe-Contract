@@ -412,6 +412,19 @@ mod tests {
         (env, contract, client)
     }
 
+    /// Registers an admin + a keeper address on `contract`, returning the keeper.
+    /// Needed because `check_and_trigger_conditionals` now requires a registered,
+    /// authenticated keeper caller.
+    fn setup_keeper(env: &Env, contract: &Address) -> Address {
+        let admin = Address::generate(env);
+        let keeper = Address::generate(env);
+        env.as_contract(contract, || {
+            crate::admin::init_admin(env, admin.clone());
+            crate::keeper::add_keeper(env, &admin, keeper.clone()).unwrap();
+        });
+        keeper
+    }
+
     fn seed_price(env: &Env, contract: &Address, asset_id: u32, price: i128) {
         env.as_contract(contract, || {
             env.storage()
@@ -499,6 +512,7 @@ mod tests {
     #[test]
     fn test_price_above_triggers() {
         let (env, contract, client) = setup();
+        let keeper = setup_keeper(&env, &contract);
         let user = Address::generate(&env);
         seed_price(&env, &contract, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 110_000);
@@ -513,10 +527,10 @@ mod tests {
             &3_600,
         );
 
-        assert_eq!(client.check_and_trigger_conditionals().len(), 0);
+        assert_eq!(client.check_and_trigger_conditionals(&keeper).len(), 0);
 
         seed_price(&env, &contract, 1, 115_000);
-        let triggered = client.check_and_trigger_conditionals();
+        let triggered = client.check_and_trigger_conditionals(&keeper);
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered.get(0).unwrap(), id);
         assert_eq!(
@@ -528,6 +542,7 @@ mod tests {
     #[test]
     fn test_price_below_triggers() {
         let (env, contract, client) = setup();
+        let keeper = setup_keeper(&env, &contract);
         let user = Address::generate(&env);
         seed_price(&env, &contract, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Below, 90_000);
@@ -543,7 +558,7 @@ mod tests {
         );
 
         seed_price(&env, &contract, 1, 85_000);
-        let triggered = client.check_and_trigger_conditionals();
+        let triggered = client.check_and_trigger_conditionals(&keeper);
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered.get(0).unwrap(), id);
     }
@@ -551,6 +566,7 @@ mod tests {
     #[test]
     fn test_time_after_triggers() {
         let (env, contract, client) = setup();
+        let keeper = setup_keeper(&env, &contract);
         let user = Address::generate(&env);
         seed_price(&env, &contract, 1, 100_000);
         let mut conditions = Vec::new(&env);
@@ -566,10 +582,10 @@ mod tests {
             &10_000,
         );
 
-        assert_eq!(client.check_and_trigger_conditionals().len(), 0);
+        assert_eq!(client.check_and_trigger_conditionals(&keeper).len(), 0);
 
         env.ledger().set_timestamp(2_001);
-        let triggered = client.check_and_trigger_conditionals();
+        let triggered = client.check_and_trigger_conditionals(&keeper);
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered.get(0).unwrap(), id);
     }
@@ -577,6 +593,7 @@ mod tests {
     #[test]
     fn test_drop_rebound_triggers() {
         let (env, contract, client) = setup();
+        let keeper = setup_keeper(&env, &contract);
         let user = Address::generate(&env);
         seed_price(&env, &contract, 1, 100_000);
         let mut conditions = Vec::new(&env);
@@ -593,10 +610,10 @@ mod tests {
         );
 
         seed_price(&env, &contract, 1, 89_000);
-        assert_eq!(client.check_and_trigger_conditionals().len(), 0);
+        assert_eq!(client.check_and_trigger_conditionals(&keeper).len(), 0);
 
         seed_price(&env, &contract, 1, 91_700);
-        let triggered = client.check_and_trigger_conditionals();
+        let triggered = client.check_and_trigger_conditionals(&keeper);
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered.get(0).unwrap(), id);
     }
@@ -604,6 +621,7 @@ mod tests {
     #[test]
     fn test_volatility_breakout_triggers() {
         let (env, contract, client) = setup();
+        let keeper = setup_keeper(&env, &contract);
         let user = Address::generate(&env);
         seed_price(&env, &contract, 1, 100_000);
         let mut conditions = Vec::new(&env);
@@ -620,10 +638,10 @@ mod tests {
         );
 
         seed_price(&env, &contract, 1, 104_000);
-        assert_eq!(client.check_and_trigger_conditionals().len(), 0);
+        assert_eq!(client.check_and_trigger_conditionals(&keeper).len(), 0);
 
         seed_price(&env, &contract, 1, 106_000);
-        let triggered = client.check_and_trigger_conditionals();
+        let triggered = client.check_and_trigger_conditionals(&keeper);
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered.get(0).unwrap(), id);
     }
@@ -631,6 +649,7 @@ mod tests {
     #[test]
     fn test_and_logic_requires_all() {
         let (env, contract, client) = setup();
+        let keeper = setup_keeper(&env, &contract);
         let user = Address::generate(&env);
         seed_price(&env, &contract, 1, 100_000);
         seed_price(&env, &contract, 2, 50_000);
@@ -649,10 +668,10 @@ mod tests {
         );
 
         seed_price(&env, &contract, 1, 115_000);
-        assert_eq!(client.check_and_trigger_conditionals().len(), 0);
+        assert_eq!(client.check_and_trigger_conditionals(&keeper).len(), 0);
 
         seed_price(&env, &contract, 2, 35_000);
-        let triggered = client.check_and_trigger_conditionals();
+        let triggered = client.check_and_trigger_conditionals(&keeper);
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered.get(0).unwrap(), id);
     }
@@ -660,6 +679,7 @@ mod tests {
     #[test]
     fn test_or_logic_requires_one() {
         let (env, contract, client) = setup();
+        let keeper = setup_keeper(&env, &contract);
         let user = Address::generate(&env);
         seed_price(&env, &contract, 1, 100_000);
         seed_price(&env, &contract, 2, 50_000);
@@ -678,7 +698,7 @@ mod tests {
         );
 
         seed_price(&env, &contract, 1, 115_000);
-        let triggered = client.check_and_trigger_conditionals();
+        let triggered = client.check_and_trigger_conditionals(&keeper);
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered.get(0).unwrap(), id);
     }
@@ -686,6 +706,7 @@ mod tests {
     #[test]
     fn test_order_expires() {
         let (env, contract, client) = setup();
+        let keeper = setup_keeper(&env, &contract);
         let user = Address::generate(&env);
         seed_price(&env, &contract, 1, 100_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 200_000);
@@ -701,7 +722,7 @@ mod tests {
         );
 
         env.ledger().set_timestamp(1_600);
-        let triggered = client.check_and_trigger_conditionals();
+        let triggered = client.check_and_trigger_conditionals(&keeper);
         assert_eq!(triggered.len(), 0);
         assert_eq!(
             client.get_conditional_order(&id).status,
@@ -712,6 +733,7 @@ mod tests {
     #[test]
     fn test_mark_executed() {
         let (env, contract, client) = setup();
+        let keeper = setup_keeper(&env, &contract);
         let user = Address::generate(&env);
         seed_price(&env, &contract, 1, 120_000);
         let conditions = simple_price_condition(&env, 1, PriceDirection::Above, 110_000);
@@ -726,7 +748,7 @@ mod tests {
             &3_600,
         );
 
-        client.check_and_trigger_conditionals();
+        client.check_and_trigger_conditionals(&keeper);
         assert_eq!(
             client.get_conditional_order(&id).status,
             ConditionalStatus::Triggered
