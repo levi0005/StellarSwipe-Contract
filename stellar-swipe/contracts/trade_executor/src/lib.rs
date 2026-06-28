@@ -70,6 +70,14 @@ pub enum StorageKey {
     FeatureFlag(String),
     /// Per-asset minimum trade size override (absent = use [`DEFAULT_MIN_TRADE_SIZE`]).
     MinTradeSize(Address),
+    /// Grace period (in ledger sequences) for cancelling queued trades before execution.
+    TradeGracePeriod,
+    /// A queued copy trade waiting for the grace period to elapse.
+    QueuedTrade(u64),
+    /// Next available queued trade ID.
+    NextQueuedTradeId,
+    /// List of all pending queued trade IDs.
+    QueuedTradeIds,
 }
 
 /// Temporary-storage key for the reentrancy lock on `execute_copy_trade`.
@@ -79,6 +87,21 @@ pub const CIRCUIT_BREAKER_DURATION_LEDGERS: u32 = 720;
 /// Denominator used to convert `entry_price * amount` into `to_token` units.
 /// Entry prices are expected to be in 7‑decimal format (e.g. 10_000_000 = 1.0).
 const ENTRY_PRICE_DENOMINATOR: i128 = 10_000_000;
+
+/// A trade queued for execution, subject to a configurable grace period.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedTrade {
+    pub queued_trade_id: u64,
+    pub user: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub queued_at_ledger: u32,
+    pub portfolio_pct_bps: Option<u32>,
+}
+
+/// Default grace period: 10 ledgers (~50 seconds at 5s/ledger).
+pub const DEFAULT_GRACE_PERIOD_LEDGERS: u32 = 10;
 
 /// A single trade input for [`TradeExecutorContract::batch_execute`].
 #[contracttype]
@@ -506,6 +529,54 @@ fn set_pending_order_ids(env: &Env, ids: &Vec<u64>) {
     env.storage()
         .instance()
         .set(&StorageKey::PendingLimitOrderIds, ids);
+}
+
+// ── Grace period helpers (Issue #702) ────────────────────────────────────────
+
+/// Return the configured grace period in ledgers (defaults to [`DEFAULT_GRACE_PERIOD_LEDGERS`]).
+fn effective_grace_period(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::TradeGracePeriod)
+        .unwrap_or(DEFAULT_GRACE_PERIOD_LEDGERS)
+}
+
+/// Generate the next queued trade ID.
+fn next_queued_trade_id(env: &Env) -> u64 {
+    let next: u64 = env
+        .storage()
+        .instance()
+        .get(&StorageKey::NextQueuedTradeId)
+        .unwrap_or(1);
+    env.storage()
+        .instance()
+        .set(&StorageKey::NextQueuedTradeId, &next.saturating_add(1));
+    next
+}
+
+/// Store a queued trade and add its ID to the index.
+fn store_queued_trade(env: &Env, trade: &QueuedTrade) {
+    let id = trade.queued_trade_id;
+    env.storage()
+        .instance()
+        .set(&StorageKey::QueuedTrade(id), trade);
+    let mut ids: Vec<u64> = env
+        .storage()
+        .instance()
+        .get(&StorageKey::QueuedTradeIds)
+        .unwrap_or_else(|| Vec::new(env));
+    ids.push_back(id);
+    env.storage()
+        .instance()
+        .set(&StorageKey::QueuedTradeIds, &ids);
+}
+
+/// Check whether the grace period has elapsed for a queued trade.
+/// Returns `true` if the trade is eligible for execution.
+fn grace_period_elapsed(env: &Env, queued_at_ledger: u32) -> bool {
+    let grace = effective_grace_period(env);
+    let current = env.ledger().sequence();
+    current.saturating_sub(queued_at_ledger) >= grace
 }
 
 #[contractimpl]
@@ -1018,6 +1089,156 @@ impl TradeExecutorContract {
 
     pub fn get_open_interest(env: Env, pair: Address) -> i128 {
         open_interest_for_pair(&env, &pair)
+    }
+
+    // ── Trade grace period (Issue #702) ─────────────────────────────────────────
+
+    /// Admin: set the grace period (in ledger sequences) that a queued trade must
+    /// wait before it becomes eligible for execution. Default is 10 ledgers.
+    /// Pass `0` to disable the grace period (trades execute immediately).
+    pub fn set_trade_grace_period(env: Env, ledgers: u32) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("not initialized");
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&StorageKey::TradeGracePeriod, &ledgers);
+    }
+
+    /// Return the configured grace period in ledgers.
+    pub fn get_trade_grace_period(env: Env) -> u32 {
+        effective_grace_period(&env)
+    }
+
+    /// Queue a copy trade for execution. Instead of executing immediately, the
+    /// trade is recorded in storage and will only be picked up by `batch_execute`
+    /// or `execute_queued_trades` after the grace period has elapsed.
+    ///
+    /// Returns the assigned queued trade ID which can be used with
+    /// `cancel_queued_trade` to cancel within the grace period.
+    pub fn queue_copy_trade(
+        env: Env,
+        user: Address,
+        token: Address,
+        amount: i128,
+        portfolio_pct_bps: Option<u32>,
+    ) -> Result<u64, ContractError> {
+        user.require_auth();
+        let queued_trade_id = next_queued_trade_id(&env);
+        let trade = QueuedTrade {
+            queued_trade_id,
+            user: user.clone(),
+            token,
+            amount,
+            queued_at_ledger: env.ledger().sequence(),
+            portfolio_pct_bps,
+        };
+        store_queued_trade(&env, &trade);
+        Ok(queued_trade_id)
+    }
+
+    /// Cancel a queued trade by its ID. Only the original user may cancel,
+    /// and only within the grace period (before the configured number of ledgers
+    /// has elapsed since queuing).
+    pub fn cancel_queued_trade(
+        env: Env,
+        user: Address,
+        queued_trade_id: u64,
+    ) -> Result<(), ContractError> {
+        user.require_auth();
+        let trade: QueuedTrade = env
+            .storage()
+            .instance()
+            .get(&StorageKey::QueuedTrade(queued_trade_id))
+            .ok_or(ContractError::QueuedTradeNotFound)?;
+
+        if trade.user != user {
+            return Err(ContractError::NotTradeOwner);
+        }
+
+        if grace_period_elapsed(&env, trade.queued_at_ledger) {
+            return Err(ContractError::GracePeriodExpired);
+        }
+
+        // Remove the queued trade from storage.
+        env.storage()
+            .instance()
+            .remove(&StorageKey::QueuedTrade(queued_trade_id));
+
+        // Remove from the index list.
+        let mut ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::QueuedTradeIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut i = 0;
+        while i < ids.len() {
+            if ids.get(i).unwrap() == queued_trade_id {
+                ids.remove(i);
+                break;
+            }
+            i += 1;
+        }
+        env.storage()
+            .instance()
+            .set(&StorageKey::QueuedTradeIds, &ids);
+
+        Ok(())
+    }
+
+    /// Execute all queued trades whose grace period has elapsed.
+    /// Returns the number of trades successfully executed.
+    pub fn execute_queued_trades(env: Env) -> Result<u32, ContractError> {
+        let ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::QueuedTradeIds)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut remaining: Vec<u64> = Vec::new(&env);
+        let mut executed: u32 = 0;
+
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            let trade: QueuedTrade = match env
+                .storage()
+                .instance()
+                .get(&StorageKey::QueuedTrade(id))
+            {
+                Some(t) => t,
+                None => continue,
+            };
+
+            if grace_period_elapsed(&env, trade.queued_at_ledger) {
+                // Execute the trade via market copy trade.
+                let result = execute_market_copy_trade(
+                    &env,
+                    trade.user,
+                    trade.token,
+                    trade.amount,
+                    trade.portfolio_pct_bps,
+                    false,
+                    None,
+                );
+                if result.is_ok() {
+                    executed = executed.saturating_add(1);
+                }
+                // Remove the queued trade record regardless of execution outcome.
+                env.storage()
+                    .instance()
+                    .remove(&StorageKey::QueuedTrade(id));
+            } else {
+                remaining.push_back(id);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&StorageKey::QueuedTradeIds, &remaining);
+        Ok(executed)
     }
 
     /// # Summary

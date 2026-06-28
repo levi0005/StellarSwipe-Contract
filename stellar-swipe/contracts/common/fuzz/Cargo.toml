@@ -32,6 +32,12 @@ path = "fuzz_targets/xdr_roundtrip.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "governance_payload"
+path = "fuzz_targets/governance_payload.rs"
+test = false
+doc = false
+
 [lints.rust]
 # Fuzzing harnesses intentionally exercise panic paths.
 dead_code = "allow"

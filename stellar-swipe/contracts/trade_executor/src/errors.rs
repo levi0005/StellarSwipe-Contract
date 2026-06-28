@@ -59,6 +59,12 @@ pub enum ContractError {
     ReplayDetected = 24,
     /// Trade amount is below the configured per-asset minimum (dust-amount griefing guard).
     BelowMinimumTradeSize = 25,
+    /// Attempt to cancel a queued trade after the grace period has elapsed.
+    GracePeriodExpired = 26,
+    /// The queued trade was not found.
+    QueuedTradeNotFound = 27,
+    /// The caller is not the trade owner.
+    NotTradeOwner = 28,
 }
 
 /// Populated when [`ContractError::InsufficientLiquidity`] is returned.
