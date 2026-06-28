@@ -7,6 +7,7 @@
 //! Qualification: provider must have >= MIN_CLOSED_SIGNALS (10) closed signals.
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Vec};
+use stellar_swipe_common::{bump_persistent_if_needed, force_bump_persistent};
 
 use crate::social;
 use crate::stake;
@@ -88,6 +89,7 @@ pub struct IndexEntry {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn load_index(env: &Env, key: LeaderboardKey) -> Vec<IndexEntry> {
+    bump_persistent_if_needed(env, &key);
     env.storage()
         .persistent()
         .get(&key)
@@ -96,6 +98,16 @@ fn load_index(env: &Env, key: LeaderboardKey) -> Vec<IndexEntry> {
 
 fn save_index(env: &Env, key: LeaderboardKey, index: &Vec<IndexEntry>) {
     env.storage().persistent().set(&key, index);
+    bump_persistent_if_needed(env, &key);
+}
+
+/// Force-extend TTL for all four leaderboard index keys.  Intended to be
+/// called by a keeper via the `bump_leaderboard_ttl` contract entrypoint.
+pub fn bump_all_leaderboard_keys(env: &Env) {
+    force_bump_persistent(env, &LeaderboardKey::SuccessRateIndex);
+    force_bump_persistent(env, &LeaderboardKey::AdoptersIndex);
+    force_bump_persistent(env, &LeaderboardKey::ProfitDeltaIndex);
+    force_bump_persistent(env, &LeaderboardKey::StakeIndex);
 }
 
 fn is_qualified(entry: &IndexEntry) -> bool {

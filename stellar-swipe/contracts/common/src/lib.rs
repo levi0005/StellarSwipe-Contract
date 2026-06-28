@@ -15,6 +15,7 @@ pub mod perf;
 pub mod rate_limit;
 #[allow(deprecated)]
 pub mod replay_protection;
+pub mod ttl_manager;
 
 pub use amm_bridge::{
     build_fallback_chain, emit_fallback_used, emit_quote_discovered, emit_route_planned,
@@ -58,6 +59,10 @@ pub use rate_limit::{
     RateLimitConfig, RateLimitError,
 };
 pub use replay_protection::{current_nonce, verify_and_commit, ReplayError};
+pub use ttl_manager::{
+    bump_persistent_if_needed, force_bump_persistent, HOT_KEY_TTL_TARGET_LEDGERS,
+    HOT_KEY_TTL_THRESHOLD_LEDGERS,
+};
 
 #[cfg(test)]
 mod storage_key_tests;

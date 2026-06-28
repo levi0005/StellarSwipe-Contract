@@ -426,6 +426,23 @@ impl SignalRegistry {
         get_admin_config(&env)
     }
 
+    /// Keeper entrypoint: proactively bump TTL for all hot leaderboard keys.
+    ///
+    /// Open to any caller — no admin auth required — since this is a purely
+    /// additive/protective operation.  Callers pay the transaction fee.
+    pub fn bump_leaderboard_ttl(env: Env) {
+        leaderboard::bump_all_leaderboard_keys(&env);
+    }
+
+    /// Keeper entrypoint: bump TTL for the active-signals storage key.
+    ///
+    /// Extend the top-level `StorageKey::Signals` map so active signal data
+    /// is never unexpectedly archived.  Open to any caller.
+    pub fn bump_signals_ttl(env: Env) {
+        stellar_swipe_common::force_bump_persistent(&env, &StorageKey::Signals);
+        stellar_swipe_common::force_bump_persistent(&env, &StorageKey::ActiveSignalsByCategory);
+    }
+
     /// Read-only health probe for monitoring and front-ends (no auth).
     pub fn health_check(env: Env) -> HealthStatus {
         let version = String::from_str(&env, env!("CARGO_PKG_VERSION"));
